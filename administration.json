@@ -1,0 +1,11 @@
+[
+    { "username": "maxdou", "recht": "Admin", "token":"" },
+    { "username": "eniblu", "recht": "Admin", "token":"" },
+    { "username": "friste", "recht": "Admin", "token":"" },
+    { "username": "tuerst1", "recht": "Scanner", "token":"" },
+    { "username": "tuerst2", "recht": "Scanner", "token":"" },
+    { "username": "tuerst3", "recht": "Scanner", "token":"" },
+    { "username": "tuerst4", "recht": "Scanner", "token":"" },
+    { "username": "tuerst5", "recht": "Scanner", "token":"" },
+    { "username": "tuerst6", "recht": "Scanner", "token":"" }
+]
