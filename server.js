@@ -2,6 +2,7 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto'); // Add crypto module for token generation
+const nodemailer = require('nodemailer'); // Add nodemailer for email sending
 const app = express();
 
 app.use(express.json());
@@ -120,8 +121,54 @@ app.get('/api/verbleibend', (req, res) => {
   res.json({ verbleibend });
 });
 
+// Configure nodemailer transporter
+const transporter = nodemailer.createTransport({
+  service: 'gmail', // Use your email provider
+  auth: {
+    user: 'abschlusstickets@gmail.com', // Replace with your email
+    pass: 'Abschluss25!'  // Replace with your email password or app-specific password
+  }
+});
+
+// Function to send email
+function sendeBestellEmail(email, bestellnummer, gesamtpreis) {
+  return new Promise((resolve, reject) => {
+    const mailOptions = {
+      from: 'abschlusstickets@gmail.com', // Replace with your email
+      to: email,
+      subject: 'Ticketbestellung - Abschlussparty 2025',
+      text: `Vielen Dank für die Bestellung!
+
+Hier sind die Zahlungsinformationen um den Bestellvorgang abzuschließen:
+Empfänger: Frida Stein
+IBAN: DE37370502990045079818
+Verwendungszweck: ${bestellnummer}
+
+Bitte prüfe und überweise den Gesamtbetrag von ${gesamtpreis.toFixed(2)} € auf das oben genannte Konto.
+
+Nach Eingang der Zahlung werden die Tickets per E-Mail zugeschickt.
+Dieser Vorgang kann bis zu einer Woche dauern.
+
+Vielen Dank und wir freuen uns aufs Feiern mit Euch!
+
+Beste Grüße,
+Euer Organisationsteam`
+    };
+
+    transporter.sendMail(mailOptions, (error, info) => {
+      if (error) {
+        console.error('Fehler beim Senden der E-Mail:', error);
+        reject(error);
+      } else {
+        console.log('E-Mail gesendet:', info.response);
+        resolve(true);
+      }
+    });
+  });
+}
+
 // POST: Ticketkauf
-app.post('/api/tickets', (req, res) => {
+app.post('/api/tickets', async (req, res) => {
   const { vorname, name, email, anzahl_tickets } = req.body;
 
   if (!vorname || !name || !email || !anzahl_tickets) {
@@ -179,19 +226,38 @@ app.post('/api/tickets', (req, res) => {
     gezahlt: false, // Initial payment status
     token // Store the full token
   };
+
   // Speichern
   tickets.push(neuer_eintrag);
   speichereTickets(tickets);
-  res.status(201).json({
-    message: 'Tickets erfolgreich gekauft.',
-    bestellnummer,
-    email,
-    name,
-    vorname,
-    gesamtpreis, // Include total price for payment
-    tickets: neue_tickets,
-    token // Include full token in the response
-  });
+
+  // Send confirmation email
+  try {
+    await sendeBestellEmail(email, bestellnummer, gesamtpreis);
+    res.status(201).json({
+      message: 'Tickets erfolgreich gekauft. Eine Bestätigungs-E-Mail wurde an Ihre Adresse gesendet.',
+      emailSent: true,
+      bestellnummer,
+      email,
+      name,
+      vorname,
+      gesamtpreis, // Include total price for payment
+      tickets: neue_tickets,
+      token // Include full token in the response
+    });
+  } catch (error) {
+    res.status(201).json({
+      message: 'Tickets erfolgreich gekauft. Die Bestätigungs-E-Mail konnte jedoch nicht gesendet werden.',
+      emailSent: false,
+      bestellnummer,
+      email,
+      name,
+      vorname,
+      gesamtpreis, // Include total price for payment
+      tickets: neue_tickets,
+      token // Include full token in the response
+    });
+  }
 });
 
 // PATCH: Update payment status
