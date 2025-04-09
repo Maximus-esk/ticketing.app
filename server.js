@@ -246,8 +246,9 @@ app.post('/api/tickets', async (req, res) => {
       token // Include full token in the response
     });
   } catch (error) {
+    console.error('Fehler beim Senden der E-Mail:', error);
     res.status(201).json({
-      message: 'Tickets erfolgreich gekauft. Die Bestätigungs-E-Mail konnte jedoch nicht gesendet werden.',
+      message: 'Tickets erfolgreich reserviert. Die Bestätigungs-E-Mail konnte jedoch nicht gesendet werden. Sie können die E-Mail erneut senden.',
       emailSent: false,
       bestellnummer,
       email,
@@ -257,6 +258,25 @@ app.post('/api/tickets', async (req, res) => {
       tickets: neue_tickets,
       token // Include full token in the response
     });
+  }
+});
+
+// POST: E-Mail erneut senden
+app.post('/api/tickets/:bestellnummer/resend-email', async (req, res) => {
+  const { bestellnummer } = req.params;
+  const tickets = ladeBisherigeTickets();
+  const ticket = tickets.find(t => t.bestellnummer === bestellnummer);
+
+  if (!ticket) {
+    return res.status(404).json({ message: 'Bestellnummer nicht gefunden.' });
+  }
+
+  try {
+    await sendeBestellEmail(ticket.email, ticket.bestellnummer, ticket.gesamtpreis);
+    res.json({ message: 'Die Bestätigungs-E-Mail wurde erfolgreich erneut gesendet.' });
+  } catch (error) {
+    console.error('Fehler beim erneuten Senden der E-Mail:', error);
+    res.status(500).json({ message: 'Die Bestätigungs-E-Mail konnte nicht gesendet werden. Bitte versuchen Sie es später erneut.' });
   }
 });
 
