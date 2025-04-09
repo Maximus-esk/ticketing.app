@@ -1,4 +1,4 @@
-const express = require('express');
+corsconst express = require('express');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto'); // Add crypto module for token generation
@@ -14,6 +14,11 @@ const ADMIN_FILE = path.join(__dirname, 'administration.json');
 const ORDER_NUMBER_FORMAT = "GFS2025"; // Format für Bestellnummer
 
 const cors = require("cors");
+
+app.get('/api/tickets', (req, res) => {
+  const tickets = ladeBisherigeTickets();
+  res.json(tickets);
+});
 
 app.use(cors({
   origin: "https://abschlusstickets.de", // deine echte Netlify-Domain
