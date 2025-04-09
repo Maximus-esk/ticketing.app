@@ -1,6 +1,8 @@
+const path = require('path'); // Ensure path is required before using it
+const envFile = process.env.NODE_ENV === 'production' ? '.env.production' : '.env.development';
+require('dotenv').config({ path: path.join(__dirname, envFile) }); // Load environment variables from the correct .env file
 const express = require('express');
 const fs = require('fs');
-const path = require('path');
 const crypto = require('crypto'); // Add crypto module for token generation
 const nodemailer = require('nodemailer'); // Add nodemailer for email sending
 const app = express();
@@ -21,8 +23,15 @@ app.get('/api/tickets', (req, res) => {
   res.json(tickets);
 });
 
+
 app.use(cors({
-  origin: "https://abschlusstickets.de", // deine echte Netlify-Domain
+  origin: process.env.CORS_ORIGIN || 'http://localhost:3000', // Set your frontend URL here
+  methods: ['GET', 'POST', 'PATCH'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  exposedHeaders: ['Authorization'],
+  preflightContinue: false,
+  optionsSuccessStatus: 204,
+  maxAge: 600, // Cache preflight response for 10 minutes
   credentials: true
 }));
 
@@ -125,8 +134,8 @@ app.get('/api/verbleibend', (req, res) => {
 const transporter = nodemailer.createTransport({
   service: 'gmail', // Use your email provider
   auth: {
-    user: 'abschlusstickets@gmail.com', // Replace with your email
-    pass: 'Abschluss25!'  // Replace with your email password or app-specific password
+    user: process.env.EMAIL_USER, // Use environment variable for email user
+    pass: process.env.EMAIL_PASS  // Use environment variable for email password
   }
 });
 
@@ -210,7 +219,7 @@ app.post('/api/tickets', async (req, res) => {
     qr_code: crypto.createHash('sha256').update(`${bestellnummer}-${email}-${nr}`).digest('hex') // Generate unique QR code
   }));
 
-  const preis_pro_ticket = 55 + (anzahl_tickets - 1) * 7.5;
+  const preis_pro_ticket = 49.99 + (anzahl_tickets - 1) * 12.49; // Updated ticket prices
   const gesamtpreis = preis_pro_ticket; // Gesamtpreis nur für die aktuelle Bestellung berechnen
 
   const neuer_eintrag = {
