@@ -13,6 +13,14 @@ const ADMIN_FILE = path.join(__dirname, 'administration.json');
 
 const ORDER_NUMBER_FORMAT = "GFS2025"; // Format für Bestellnummer
 
+const cors = require("cors");
+
+app.use(cors({
+  origin: "https://shimmering-narwhal-d31aaf.netlify.app/", // deine echte Netlify-Domain
+  credentials: true
+}));
+
+
 // Hilfsfunktionen
 function ladeKonfiguration() {
   const raw = fs.readFileSync(CONFIG_FILE, 'utf8');
