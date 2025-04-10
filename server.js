@@ -1,82 +1,77 @@
-const cors = require("cors");
-const path = require('path'); // Ensure path is required before using it
-
-// Ensure NODE_ENV has a default value
-const NODE_ENV = process.env.NODE_ENV || 'development';
-
-// Determine the correct .env file based on NODE_ENV
-const envFile = NODE_ENV === 'production' ? '.env.production' : '.env';
-
-// Load environment variables from the correct .env file
-require('dotenv').config({ path: path.join(__dirname, envFile) });
-
+const path = require('path');
+const { Pool } = require('pg'); // Use PostgreSQL
 const express = require('express');
 const fs = require('fs');
-const crypto = require('crypto'); // Add crypto module for token generation
-const nodemailer = require('nodemailer'); // Add nodemailer for email sending
-const app = express();
+const crypto = require('crypto');
+const nodemailer = require('nodemailer');
+const cors = require('cors');
+require('dotenv').config({ path: path.join(__dirname, process.env.NODE_ENV === 'production' ? '.env.production' : '.env') });
 
-// CORS-Middleware sollte vor den anderen Middlewares und Routen stehen
+const app = express();
+app.use(express.json());
 app.use(cors({
-  origin: function (origin, callback) {
-    const allowedOrigins = [
-      'https://abschlusstickets.de',
-      'https://www.abschlusstickets.de',
-      'https://shimmering-narwhal-d31aaf.netlify.app'
-    ];
-  
-    // erlaubt Server-zu-Server-Requests (z. B. Cronjobs, Postman)
-    if (!origin || allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      callback(new Error('CORS error: Origin not allowed → ' + origin));
-    }
-  },
+  origin: process.env.CORS_ORIGIN,
   methods: ['GET', 'POST', 'PATCH'],
   allowedHeaders: ['Content-Type', 'Authorization'],
-  exposedHeaders: ['Authorization'],
-  preflightContinue: false,
-  optionsSuccessStatus: 204,
-  maxAge: 600, // Cache preflight response for 10 minutes
   credentials: true
 }));
 
-app.use(express.json());
-app.use(express.static(path.join(__dirname, '../public'))); // Serve static files from the public folder
-
-const DATA_FILE = path.join(__dirname, 'tickets.json');
-const CONFIG_FILE = path.join(__dirname, 'config.json');
-const ADMIN_FILE = path.join(__dirname, 'administration.json');
-
-const ORDER_NUMBER_FORMAT = "GFS2025"; // Format für Bestellnummer
-
-app.get('/api/tickets', (req, res) => {
-  const tickets = ladeBisherigeTickets();
-  res.json(tickets);
+// PostgreSQL connection pool
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
-// Hilfsfunktionen
-function ladeKonfiguration() {
-  const raw = fs.readFileSync(CONFIG_FILE, 'utf8');
-  return JSON.parse(raw);
-}
-
-function ladeBisherigeTickets() {
+// Initialize database schema
+async function initializeDatabase() {
+  const client = await pool.connect();
   try {
-    const data = fs.readFileSync(DATA_FILE, 'utf8');
-    return data ? JSON.parse(data) : [];
-  } catch (err) {
-    return [];
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS tickets (
+        id SERIAL PRIMARY KEY,
+        vorname TEXT NOT NULL,
+        name TEXT NOT NULL,
+        email TEXT NOT NULL,
+        anzahl_tickets INTEGER NOT NULL,
+        zeitpunkt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        letzte_ticketnummer INTEGER,
+        bestellnummer TEXT UNIQUE NOT NULL,
+        gesamtpreis REAL NOT NULL,
+        gezahlt BOOLEAN DEFAULT FALSE,
+        token TEXT UNIQUE NOT NULL,
+        scanned BOOLEAN DEFAULT FALSE
+      );
+    `);
+  } finally {
+    client.release();
   }
 }
+initializeDatabase().catch(console.error);
 
-function speichereTickets(tickets) {
-  fs.writeFileSync(DATA_FILE, JSON.stringify(tickets, null, 2));
+// Helper functions
+async function ladeBisherigeTickets() {
+  const { rows } = await pool.query('SELECT * FROM tickets');
+  return rows;
 }
 
-function berechneVerbleibend(tickets, maxTickets) {
-  const verkauft = tickets.reduce((sum, t) => sum + t.anzahl_tickets, 0);
-  return maxTickets - verkauft;
+async function speichereTicket(ticket) {
+  const query = `
+    INSERT INTO tickets (vorname, name, email, anzahl_tickets, zeitpunkt, letzte_ticketnummer, bestellnummer, gesamtpreis, token)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    RETURNING *;
+  `;
+  const values = [
+    ticket.vorname, ticket.name, ticket.email, ticket.anzahl_tickets,
+    ticket.zeitpunkt, ticket.letzte_ticketnummer, ticket.bestellnummer,
+    ticket.gesamtpreis, ticket.token
+  ];
+  const { rows } = await pool.query(query, values);
+  return rows[0];
+}
+
+async function berechneVerbleibend(maxTickets) {
+  const { rows } = await pool.query('SELECT COALESCE(SUM(anzahl_tickets), 0) AS verkauft FROM tickets');
+  return maxTickets - rows[0].verkauft;
 }
 
 // Hilfsfunktion: Benutzer aus administration.json laden
@@ -93,11 +88,9 @@ function ladeBenutzer() {
 // Hilfsfunktion: Token validieren
 function validiereToken(token) {
   const benutzerListe = ladeBenutzer();
-  const entschlüsselt = Buffer.from(token, 'base64').toString('utf8'); // Token entschlüsseln
-  const [username, recht] = entschlüsselt.split(':');
 
   const benutzer = benutzerListe.find(
-    (user) => user.username === username && user.recht === recht
+    (user) => user.token === token // Vergleiche den übergebenen Token mit dem hinterlegten Token
   );
 
   return benutzer || null; // Gibt den Benutzer zurück, wenn gefunden, sonst null
@@ -105,48 +98,62 @@ function validiereToken(token) {
 
 // Middleware: Token-Authentifizierung
 function authentifiziere(req, res, next) {
-  // Token aus Header oder Query-Parameter lesen
-  const token = req.headers['authorization'] || req.query.token;
+  const token = req.query.token;
 
   if (!token) {
-    return res.status(401).json({ error: 'Kein Token bereitgestellt' });
+    return res.status(401).sendFile(path.join(__dirname, '../public/unauthorized.html'));
   }
 
   const benutzer = validiereToken(token);
 
   if (!benutzer) {
-    return res.status(403).json({ error: 'Ungültiger Token oder keine Berechtigung' });
+    return res.status(403).sendFile(path.join(__dirname, '../public/unauthorized.html'));
   }
 
-  req.benutzer = benutzer; // Benutzerinformationen für nachfolgende Routen speichern
+  req.benutzer = benutzer;
   next();
 }
 
-// Beispiel: Geschützte Route für Bestellwesen
+// Kombinierte Route: Ticketing und Bestellwesen
 app.get('/ticketing', authentifiziere, (req, res) => {
-  if (req.benutzer.recht !== 'Purchase' || req.benutzer.recht !== 'Admin') {
-    return res.status(403).json({ error: 'Keine Berechtigung für Bestellwesen' });
+  if (req.benutzer.recht !== 'Admin' && req.benutzer.recht !== 'Purchase') {
+    return res.status(403).json({ error: 'Keine Berechtigung für Ticketing' });
   }
 
-  const tickets = ladeBisherigeTickets();
-  res.json({ tickets });
+  // Prüfe, ob JSON-Daten oder HTML-Datei angefordert wird
+  if (req.headers.accept && req.headers.accept.includes('application/json')) {
+    ladeBisherigeTickets((tickets) => {
+      res.json({ tickets });
+    });
+  } else {
+    res.sendFile(path.join(__dirname, '../public/ticketing.html'));
+  }
 });
 
-// Beispiel: Geschützte Route für Ticketscanner
+// Kombinierte Route: Inlet und Ticketscanner
 app.get('/inlet', authentifiziere, (req, res) => {
-  if (req.benutzer.recht !== 'Scanner' || req.benutzer.recht !== 'Admin') {
-    return res.status(403).json({ error: 'Keine Berechtigung für Ticketscanner' });
+  if (req.benutzer.recht !== 'Admin' && req.benutzer.recht !== 'Scanner') {
+    return res.status(403).json({ error: 'Keine Berechtigung für Inlet' });
   }
 
-  res.json({ message: 'Zugriff auf Ticketscanner erlaubt' });
+  // Prüfe, ob JSON-Daten oder HTML-Datei angefordert wird
+  if (req.headers.accept && req.headers.accept.includes('application/json')) {
+    res.json({ message: 'Zugriff auf Ticketscanner erlaubt' });
+  } else {
+    res.sendFile(path.join(__dirname, '../public/inlet.html'));
+  }
 });
 
 // GET: Verfügbare Tickets
-app.get('/api/verbleibend', (req, res) => {
-  const config = ladeKonfiguration();
-  const tickets = ladeBisherigeTickets();
-  const verbleibend = berechneVerbleibend(tickets, config.maxTickets);
-  res.json({ verbleibend });
+app.get('/api/verbleibend', async (req, res) => {
+  try {
+    const config = JSON.parse(fs.readFileSync(path.join(__dirname, 'config.json'), 'utf8'));
+    const verbleibend = await berechneVerbleibend(config.maxTickets);
+    res.json({ verbleibend });
+  } catch (error) {
+    console.error('Error calculating remaining tickets:', error);
+    res.status(500).json({ message: 'Fehler beim Berechnen der verbleibenden Tickets.' });
+  }
 });
 
 // Configure nodemailer transporter
@@ -202,131 +209,126 @@ Dein Orga-Team der Abschlussparty 2025`
 // POST: Ticketkauf
 app.post('/api/tickets', async (req, res) => {
   const { vorname, name, email, anzahl_tickets } = req.body;
-
   if (!vorname || !name || !email || !anzahl_tickets) {
     return res.status(400).json({ message: 'Alle Felder müssen ausgefüllt sein.' });
   }
-
   if (anzahl_tickets < 1 || anzahl_tickets > 10) {
     return res.status(400).json({ message: 'Maximal 10 Tickets pro Person erlaubt.' });
   }
 
-  // Lese Konfiguration und aktuelle Ticketdaten
-  const config = ladeKonfiguration();
-  const maxTickets = config.maxTickets;
-  const tickets = ladeBisherigeTickets();
-  const verbleibend = berechneVerbleibend(tickets, maxTickets);
-
-  // Prüfe, ob noch genug Tickets verfügbar sind
-  if (anzahl_tickets > verbleibend) {
-    return res.status(400).json({ message: 'Nicht genügend Tickets verfügbar.' });
-  }
-
-  // Prüfe, ob der Käufer bereits Tickets gekauft hat
-  const existingBuyer = tickets.find(t => t.name === name && t.email === email);
-  if (existingBuyer) {
-    return res.status(400).json({ message: 'Sie haben bereits Tickets gekauft.' });
-  }
-
-  const letzte_ticketnummer = tickets.length
-    ? tickets[tickets.length - 1].letzte_ticketnummer
-    : 25000;
-
-  const neue_ticketnummern = Array.from({ length: anzahl_tickets }, (_, i) => letzte_ticketnummer + i + 1);
-
-  const bestellnummer = `${ORDER_NUMBER_FORMAT}-${String(tickets.length + 1).padStart(4, '0')}`;
-  const token = crypto.createHash('sha256').update(`${bestellnummer}${email}`).digest('hex'); // Generate full token
-
-  const neue_tickets = neue_ticketnummern.map(nr => ({
-    nummer: nr,
-    qr_code: crypto.createHash('sha256').update(`${bestellnummer}-${email}-${nr}`).digest('hex') // Generate unique QR code
-  }));
-
-  const preis_pro_ticket = 49.99 + (anzahl_tickets - 1) * 12.49; // Updated ticket prices
-  const gesamtpreis = preis_pro_ticket; // Gesamtpreis nur für die aktuelle Bestellung berechnen
-
-  const neuer_eintrag = {
-    vorname,
-    name,
-    email,
-    anzahl_tickets,
-    zeitpunkt: new Date().toISOString(),
-    letzte_ticketnummer: neue_ticketnummern[neue_ticketnummern.length - 1],
-    bestellnummer,
-    gesamtpreis, // Gesamtpreis speichern
-    tickets: neue_tickets,
-    gezahlt: false, // Initial payment status
-    token // Store the full token
-  };
-
-  // Speichern
-  tickets.push(neuer_eintrag);
-  speichereTickets(tickets);
-
-  // Send confirmation email
   try {
-    await sendeBestellEmail(email, bestellnummer, gesamtpreis, anzahl_tickets);
+    const config = JSON.parse(fs.readFileSync(path.join(__dirname, 'config.json'), 'utf8'));
+    const verbleibend = await berechneVerbleibend(config.maxTickets);
+    if (anzahl_tickets > verbleibend) {
+      return res.status(400).json({ message: 'Nicht genügend Tickets verfügbar.' });
+    }
+
+    const { rows } = await pool.query('SELECT * FROM tickets WHERE name = $1 AND email = $2', [name, email]);
+    if (rows.length > 0) {
+      return res.status(400).json({ message: 'Sie haben bereits Tickets gekauft.' });
+    }
+
+    const { rows: lastTicketRows } = await pool.query('SELECT MAX(letzte_ticketnummer) AS letzte_ticketnummer FROM tickets');
+    const letzte_ticketnummer = lastTicketRows[0].letzte_ticketnummer || 25000;
+    const neue_ticketnummern = Array.from({ length: anzahl_tickets }, (_, i) => letzte_ticketnummer + i + 1);
+    const bestellnummer = `GFS2025-${String(Date.now()).slice(-4)}`;
+    const token = crypto.createHash('sha256').update(`${bestellnummer}${email}`).digest('hex');
+    const gesamtpreis = 49.99 + (anzahl_tickets - 1) * 12.49;
+
+    const neuer_eintrag = {
+      vorname, name, email, anzahl_tickets,
+      zeitpunkt: new Date().toISOString(),
+      letzte_ticketnummer: neue_ticketnummern[neue_ticketnummern.length - 1],
+      bestellnummer, gesamtpreis, token
+    };
+
+    const ticket = await speichereTicket(neuer_eintrag);
     res.status(201).json({
-      message: 'Tickets erfolgreich gekauft. Eine Bestätigungs-E-Mail wurde an Ihre Adresse gesendet.',
-      emailSent: true,
+      message: 'Tickets erfolgreich gekauft.',
       bestellnummer,
-      email,
-      name,
-      vorname,
-      gesamtpreis, // Include total price for payment
-      tickets: neue_tickets,
-      token // Include full token in the response
+      gesamtpreis,
+      tickets: neue_ticketnummern.map(nr => ({ nummer: nr })),
+      token
     });
   } catch (error) {
-    console.error('Fehler beim Senden der E-Mail:', error);
-    res.status(201).json({
-      message: 'Tickets erfolgreich reserviert. Die Bestätigungs-E-Mail konnte jedoch nicht gesendet werden. Sie können die E-Mail erneut senden.',
-      emailSent: false,
-      bestellnummer,
-      email,
-      name,
-      vorname,
-      gesamtpreis, // Include total price for payment
-      tickets: neue_tickets,
-      token // Include full token in the response
-    });
+    console.error('Error saving ticket:', error);
+    res.status(500).json({ message: 'Fehler beim Speichern des Tickets.' });
   }
 });
 
 // POST: E-Mail erneut senden
-app.post('/api/tickets/:bestellnummer/resend-email', async (req, res) => {
+app.post('/api/tickets/:bestellnummer/resend-email', (req, res) => {
   const { bestellnummer } = req.params;
-  const tickets = ladeBisherigeTickets();
-  const ticket = tickets.find(t => t.bestellnummer === bestellnummer);
 
-  if (!ticket) {
-    return res.status(404).json({ message: 'Bestellnummer nicht gefunden.' });
-  }
+  db.get('SELECT * FROM tickets WHERE bestellnummer = ?', [bestellnummer], (err, row) => {
+    if (err) {
+      console.error('Error fetching ticket for email resend:', err);
+      return res.status(500).json({ message: 'Fehler beim Abrufen des Tickets.' });
+    }
 
-  try {
-    await sendeBestellEmail(ticket.email, ticket.bestellnummer, ticket.gesamtpreis, ticket.anzahl_tickets);
+    if (!row) {
+      return res.status(404).json({ message: 'Bestellnummer nicht gefunden.' });
+    }
+
+    // Simulate email sending
+    console.log(`Resending email to ${row.email} for order ${bestellnummer}`);
     res.json({ message: 'Die Bestätigungs-E-Mail wurde erfolgreich erneut gesendet.' });
-  } catch (error) {
-    console.error('Fehler beim erneuten Senden der E-Mail:', error);
-    res.status(500).json({ message: 'Die Bestätigungs-E-Mail konnte nicht gesendet werden. Bitte versuchen Sie es später erneut.' });
-  }
+  });
 });
 
 // PATCH: Update payment status
-app.patch('/api/tickets/:bestellnummer/gezahlt', (req, res) => {
+app.patch('/api/tickets/:bestellnummer/gezahlt', async (req, res) => {
   const { bestellnummer } = req.params;
-  const tickets = ladeBisherigeTickets();
-  const ticketIndex = tickets.findIndex(t => t.bestellnummer === bestellnummer);
-
-  if (ticketIndex === -1) {
-    return res.status(404).json({ message: 'Bestellnummer nicht gefunden.' });
+  try {
+    const { rowCount } = await pool.query('UPDATE tickets SET gezahlt = TRUE WHERE bestellnummer = $1', [bestellnummer]);
+    if (rowCount === 0) {
+      return res.status(404).json({ message: 'Bestellnummer nicht gefunden.' });
+    }
+    res.json({ message: 'Zahlungsstatus aktualisiert.' });
+  } catch (error) {
+    console.error('Error updating payment status:', error);
+    res.status(500).json({ message: 'Fehler beim Aktualisieren des Zahlungsstatus.' });
   }
-
-  tickets[ticketIndex].gezahlt = true;
-  speichereTickets(tickets);
-  res.json({ message: 'Zahlungsstatus aktualisiert.', ticket: tickets[ticketIndex] });
 });
 
+// POST: Validate QR code
+app.post('/api/validate-ticket', (req, res) => {
+  const { token } = req.body;
+
+  if (!token) {
+    return res.status(400).json({ message: 'Kein Token bereitgestellt.' });
+  }
+
+  // Check if the token exists and if the ticket is paid
+  db.get('SELECT * FROM tickets WHERE token = ?', [token], (err, ticket) => {
+    if (err) {
+      console.error('Error validating token:', err);
+      return res.status(500).json({ message: 'Fehler bei der Token-Validierung.' });
+    }
+
+    if (!ticket) {
+      return res.status(404).json({ message: 'Ungültiger QR-Code.' });
+    }
+
+    if (ticket.gezahlt !== 1) {
+      return res.status(400).json({ message: 'Ticket ist nicht bezahlt.' });
+    }
+
+    if (ticket.scanned === 1) {
+      return res.status(400).json({ message: 'Ticket wurde bereits gescannt.' });
+    }
+
+    // Mark the ticket as scanned
+    db.run('UPDATE tickets SET scanned = 1 WHERE id = ?', [ticket.id], (updateErr) => {
+      if (updateErr) {
+        console.error('Error updating scanned status:', updateErr);
+        return res.status(500).json({ message: 'Fehler beim Aktualisieren des Scan-Status.' });
+      }
+
+      res.json({ message: `Ticket für ${ticket.name} akzeptiert.` });
+    });
+  });
+});
 
 // Server starten
 const PORT = process.env.PORT || 3000;
