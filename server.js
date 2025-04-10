@@ -46,7 +46,7 @@ app.use(cors({
     } else {
       callback(new Error('CORS error: Origin not allowed → ' + origin));
     }
-  }
+  },
   methods: ['GET', 'POST', 'PATCH'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   exposedHeaders: ['Authorization'],
