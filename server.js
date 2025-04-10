@@ -10,7 +10,7 @@ require('dotenv').config({ path: path.join(__dirname, process.env.NODE_ENV === '
 const app = express();
 app.use(express.json());
 app.use(cors({
-  origin: process.env.CORS_ORIGIN,
+  origin: process.env.CORS_ORIGIN, // Dynamische CORS-Origin
   methods: ['GET', 'POST', 'PATCH'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true
@@ -173,6 +173,17 @@ app.get('/api/verbleibend', async (req, res) => {
   }
 });
 
+// GET: Fetch all tickets
+app.get('/api/tickets', async (req, res) => {
+  try {
+    const tickets = await ladeBisherigeTickets();
+    res.json(tickets);
+  } catch (error) {
+    console.error('Fehler beim Abrufen der Tickets:', error);
+    res.status(500).json({ message: 'Fehler beim Abrufen der Tickets.' });
+  }
+});
+
 // Configure nodemailer transporter
 const transporter = nodemailer.createTransport({
   service: 'gmail', // Use your email provider
@@ -273,24 +284,23 @@ app.post('/api/tickets', async (req, res) => {
   }
 });
 
-// POST: E-Mail erneut senden
-app.post('/api/tickets/:bestellnummer/resend-email', (req, res) => {
+// Entferne SQLite-bezogene Funktionen und ersetze sie durch PostgreSQL-Abfragen
+app.post('/api/tickets/:bestellnummer/resend-email', async (req, res) => {
   const { bestellnummer } = req.params;
 
-  db.get('SELECT * FROM tickets WHERE bestellnummer = ?', [bestellnummer], (err, row) => {
-    if (err) {
-      console.error('Error fetching ticket for email resend:', err);
-      return res.status(500).json({ message: 'Fehler beim Abrufen des Tickets.' });
-    }
-
-    if (!row) {
+  try {
+    const { rows } = await pool.query('SELECT * FROM tickets WHERE bestellnummer = $1', [bestellnummer]);
+    if (rows.length === 0) {
       return res.status(404).json({ message: 'Bestellnummer nicht gefunden.' });
     }
 
-    // Simulate email sending
-    console.log(`Resending email to ${row.email} for order ${bestellnummer}`);
+    const ticket = rows[0];
+    console.log(`Resending email to ${ticket.email} for order ${bestellnummer}`);
     res.json({ message: 'Die Bestätigungs-E-Mail wurde erfolgreich erneut gesendet.' });
-  });
+  } catch (error) {
+    console.error('Error fetching ticket for email resend:', error);
+    res.status(500).json({ message: 'Fehler beim Abrufen des Tickets.' });
+  }
 });
 
 // PATCH: Update payment status
@@ -308,43 +318,35 @@ app.patch('/api/tickets/:bestellnummer/gezahlt', async (req, res) => {
   }
 });
 
-// POST: Validate QR code
-app.post('/api/validate-ticket', (req, res) => {
+// Ändere die QR-Code-Validierungsroute, um PostgreSQL zu verwenden
+app.post('/api/validate-ticket', async (req, res) => {
   const { token } = req.body;
 
   if (!token) {
     return res.status(400).json({ message: 'Kein Token bereitgestellt.' });
   }
 
-  // Check if the token exists and if the ticket is paid
-  db.get('SELECT * FROM tickets WHERE token = ?', [token], (err, ticket) => {
-    if (err) {
-      console.error('Error validating token:', err);
-      return res.status(500).json({ message: 'Fehler bei der Token-Validierung.' });
-    }
-
-    if (!ticket) {
+  try {
+    const { rows } = await pool.query('SELECT * FROM tickets WHERE token = $1', [token]);
+    if (rows.length === 0) {
       return res.status(404).json({ message: 'Ungültiger QR-Code.' });
     }
 
-    if (ticket.gezahlt !== 1) {
+    const ticket = rows[0];
+    if (!ticket.gezahlt) {
       return res.status(400).json({ message: 'Ticket ist nicht bezahlt.' });
     }
 
-    if (ticket.scanned === 1) {
+    if (ticket.scanned) {
       return res.status(400).json({ message: 'Ticket wurde bereits gescannt.' });
     }
 
-    // Mark the ticket as scanned
-    db.run('UPDATE tickets SET scanned = 1 WHERE id = ?', [ticket.id], (updateErr) => {
-      if (updateErr) {
-        console.error('Error updating scanned status:', updateErr);
-        return res.status(500).json({ message: 'Fehler beim Aktualisieren des Scan-Status.' });
-      }
-
-      res.json({ message: `Ticket für ${ticket.name} akzeptiert.` });
-    });
-  });
+    await pool.query('UPDATE tickets SET scanned = TRUE WHERE id = $1', [ticket.id]);
+    res.json({ message: `Ticket für ${ticket.name} akzeptiert.` });
+  } catch (error) {
+    console.error('Error validating token:', error);
+    res.status(500).json({ message: 'Fehler bei der Token-Validierung.' });
+  }
 });
 
 // Server starten
