@@ -38,7 +38,8 @@ async function initializeDatabase() {
         zeitpunkt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         bestellnummer TEXT UNIQUE NOT NULL,
         gesamtpreis REAL NOT NULL,
-        gezahlt BOOLEAN DEFAULT FALSE
+        gezahlt BOOLEAN DEFAULT FALSE,
+        email_sent BOOLEAN DEFAULT FALSE
       );
     `);
 
@@ -253,42 +254,65 @@ Dein Orga-Team der Abschlussparty 2025`
   });
 }
 
-// Function to generate a PDF with tickets and QR codes
-async function generateTicketPDF(tickets) {
-  const doc = new PDFDocument();
+// Function to generate a styled PDF for a single ticket
+async function generateStyledTicketPDF(ticket, order) {
+  const doc = new PDFDocument({ size: 'A4', margin: 50 });
   const buffers = [];
 
   doc.on('data', buffers.push.bind(buffers));
   doc.on('end', () => {});
 
-  doc.fontSize(20).text('Deine Tickets für die Abschlussparty 2025', { align: 'center' });
+  // Header
+  doc.rect(0, 0, doc.page.width, 100).fill('#121212');
+  doc.fillColor('#f0e68c').fontSize(24).text('Abschlussparty 2025', { align: 'center', valign: 'center' });
   doc.moveDown();
 
-  for (const ticket of tickets) {
-    const qrCodeData = await QRCode.toDataURL(ticket.token);
-    doc.fontSize(14).text(`Ticketnummer: ${ticket.nummer}`);
-    doc.image(qrCodeData, { fit: [150, 150], align: 'center' });
-    doc.moveDown();
-  }
+  // Ticket details
+  doc.fillColor('#000').fontSize(16).text(`Ticketnummer: ${ticket.nummer}`, { align: 'left' });
+  doc.text(`Name: ${order.vorname} ${order.name}`, { align: 'left' });
+  doc.text(`E-Mail: ${order.email}`, { align: 'left' });
+  doc.text(`Bestellnummer: ${order.bestellnummer}`, { align: 'left' });
+  doc.text(`Preis: ${ticket.preis.toFixed(2)} €`, { align: 'left' });
+  doc.moveDown();
+
+  // QR Code
+  const qrCodeData = await QRCode.toDataURL(ticket.token);
+  doc.image(qrCodeData, { fit: [150, 150], align: 'center' });
+  doc.moveDown();
+
+  // Footer
+  doc.rect(0, doc.page.height - 50, doc.page.width, 50).fill('#121212');
+  doc.fillColor('#f0e68c').fontSize(12).text('Vielen Dank für deine Unterstützung! Wir freuen uns auf dich.', {
+    align: 'center',
+    valign: 'bottom',
+  });
 
   doc.end();
   return Buffer.concat(buffers);
 }
 
-// Function to send ticket emails
+// Function to send ticket emails with individual PDFs
 async function sendTicketEmails() {
   try {
     const { rows: paidOrders } = await pool.query(
-      'SELECT * FROM tickets WHERE gezahlt = TRUE AND scanned = FALSE'
+      'SELECT * FROM tickets WHERE gezahlt = TRUE AND email_sent = FALSE'
     );
 
     for (const order of paidOrders) {
       const tickets = Array.from({ length: order.anzahl_tickets }, (_, i) => ({
         nummer: order.letzte_ticketnummer - order.anzahl_tickets + i + 1,
         token: order.token,
+        preis: i === 0 ? 49.99 : 12.49, // First ticket is full price, others are discounted
       }));
 
-      const pdfBuffer = await generateTicketPDF(tickets);
+      const attachments = [];
+      for (const ticket of tickets) {
+        const pdfBuffer = await generateStyledTicketPDF(ticket, order);
+        attachments.push({
+          filename: `Ticket_${ticket.nummer}.pdf`,
+          content: pdfBuffer,
+        });
+      }
 
       const mailOptions = {
         from: process.env.EMAIL_USER,
@@ -302,16 +326,18 @@ Wir freuen uns auf dich!
 
 Herzliche Grüße,
 Dein Orga-Team der Abschlussparty 2025`,
-        attachments: [
-          {
-            filename: 'tickets.pdf',
-            content: pdfBuffer,
-          },
-        ],
+        attachments,
       };
 
-      await transporter.sendMail(mailOptions);
-      console.log(`Tickets für ${order.email} gesendet.`);
+      try {
+        await transporter.sendMail(mailOptions);
+        console.log(`Tickets für ${order.email} gesendet.`);
+
+        // Mark the order as email_sent
+        await pool.query('UPDATE tickets SET email_sent = TRUE WHERE id = $1', [order.id]);
+      } catch (error) {
+        console.error(`Fehler beim Senden der E-Mail an ${order.email}:`, error);
+      }
     }
   } catch (error) {
     console.error('Fehler beim Senden der Ticket-E-Mails:', error);
