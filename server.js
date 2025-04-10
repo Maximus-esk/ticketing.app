@@ -443,13 +443,43 @@ app.post('/api/tickets/:bestellnummer/resend-email', async (req, res) => {
       return res.status(404).json({ message: 'Bestellnummer nicht gefunden.' });
     }
 
-    const ticket = rows[0];
-    await sendeBestellEmail(ticket.email, ticket.bestellnummer, ticket.gesamtpreis, ticket.anzahl_tickets);
-    console.log(`Resending email to ${ticket.email} for order ${bestellnummer}`);
-    res.json({ message: 'Die Bestätigungs-E-Mail wurde erfolgreich erneut gesendet.' });
+    const order = rows[0];
+    const tickets = Array.from({ length: order.anzahl_tickets }, (_, i) => ({
+      nummer: order.letzte_ticketnummer - order.anzahl_tickets + i + 1,
+      token: order.token,
+      preis: i === 0 ? 49.99 : 12.49, // First ticket is full price, others are discounted
+    }));
+
+    const attachments = [];
+    for (const ticket of tickets) {
+      const pdfBuffer = await generateStyledTicketPDF(ticket, order);
+      attachments.push({
+        filename: `Ticket_${ticket.nummer}.pdf`,
+        content: pdfBuffer,
+      });
+    }
+
+    const mailOptions = {
+      from: process.env.EMAIL_USER,
+      to: order.email,
+      subject: 'Deine Tickets für die Abschlussparty 2025',
+      text: `Hallo ${order.vorname} ${order.name},
+
+anbei findest du deine Tickets für die Abschlussparty 2025. Bitte bringe die Tickets in digitaler oder ausgedruckter Form mit.
+
+Wir freuen uns auf dich!
+
+Herzliche Grüße,
+Dein Orga-Team der Abschlussparty 2025`,
+      attachments,
+    };
+
+    await transporter.sendMail(mailOptions);
+    console.log(`Tickets für ${order.email} erneut gesendet.`);
+    res.json({ message: 'Die Ticket-E-Mail wurde erfolgreich erneut gesendet.' });
   } catch (error) {
-    console.error('Error fetching ticket for email resend:', error);
-    res.status(500).json({ message: 'Fehler beim Abrufen des Tickets.' });
+    console.error('Fehler beim erneuten Senden der Ticket-E-Mail:', error);
+    res.status(500).json({ message: 'Fehler beim erneuten Senden der Ticket-E-Mail.' });
   }
 });
 
@@ -564,6 +594,22 @@ app.delete('/api/tickets/:bestellnummer', async (req, res) => {
   } catch (error) {
     console.error('Fehler beim Löschen der unbezahlten Bestellung:', error);
     res.status(500).json({ message: 'Fehler beim Löschen der unbezahlten Bestellung.' });
+  }
+});
+
+// DELETE: Remove an order by bestellnummer
+app.delete('/api/tickets/:bestellnummer', async (req, res) => {
+  const { bestellnummer } = req.params;
+
+  try {
+    const { rowCount } = await pool.query('DELETE FROM tickets WHERE bestellnummer = $1', [bestellnummer]);
+    if (rowCount === 0) {
+      return res.status(404).json({ message: 'Bestellung nicht gefunden.' });
+    }
+    res.json({ message: 'Bestellung erfolgreich gelöscht.' });
+  } catch (error) {
+    console.error('Fehler beim Löschen der Bestellung:', error);
+    res.status(500).json({ message: 'Fehler beim Löschen der Bestellung.' });
   }
 });
 
