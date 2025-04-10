@@ -310,7 +310,7 @@ setInterval(sendTicketEmails, 30 * 60 * 1000);
 // POST: Ticketkauf
 app.post('/api/tickets', authentifiziere, async (req, res) => {
   const { vorname, name, email, anzahl_tickets } = req.body;
-  if (!vorname || !name || !email || !anzahl_tickets) {
+  if (!vorname || !name || !email || anzahl_tickets) {
     return res.status(400).json({ message: 'Alle Felder müssen ausgefüllt sein.' });
   }
   if (anzahl_tickets < 1 || anzahl_tickets > 10) {
@@ -362,7 +362,7 @@ app.post('/api/tickets', authentifiziere, async (req, res) => {
   }
 });
 
-// Entferne SQLite-bezogene Funktionen und ersetze sie durch PostgreSQL-Abfragen
+// POST: Resend confirmation email
 app.post('/api/tickets/:bestellnummer/resend-email', authentifiziere, async (req, res) => {
   const { bestellnummer } = req.params;
 
@@ -373,6 +373,7 @@ app.post('/api/tickets/:bestellnummer/resend-email', authentifiziere, async (req
     }
 
     const ticket = rows[0];
+    await sendeBestellEmail(ticket.email, ticket.bestellnummer, ticket.gesamtpreis, ticket.anzahl_tickets);
     console.log(`Resending email to ${ticket.email} for order ${bestellnummer}`);
     res.json({ message: 'Die Bestätigungs-E-Mail wurde erfolgreich erneut gesendet.' });
   } catch (error) {
@@ -396,7 +397,7 @@ app.patch('/api/tickets/:bestellnummer/gezahlt', authentifiziere, async (req, re
   }
 });
 
-// Ändere die QR-Code-Validierungsroute, um PostgreSQL zu verwenden
+// POST: Validate ticket via QR code
 app.post('/api/validate-ticket', authentifiziere, async (req, res) => {
   const { token } = req.body;
 
@@ -424,6 +425,21 @@ app.post('/api/validate-ticket', authentifiziere, async (req, res) => {
   } catch (error) {
     console.error('Error validating token:', error);
     res.status(500).json({ message: 'Fehler bei der Token-Validierung.' });
+  }
+});
+
+// DELETE: Remove a ticket by ID
+app.delete('/api/tickets/:id', authentifiziere, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const { rowCount } = await pool.query('DELETE FROM tickets WHERE id = $1', [id]);
+    if (rowCount === 0) {
+      return res.status(404).json({ message: 'Ticket nicht gefunden.' });
+    }
+    res.json({ message: 'Ticket erfolgreich gelöscht.' });
+  } catch (error) {
+    console.error('Fehler beim Löschen des Tickets:', error);
+    res.status(500).json({ message: 'Fehler beim Löschen des Tickets.' });
   }
 });
 
