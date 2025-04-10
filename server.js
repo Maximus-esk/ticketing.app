@@ -5,6 +5,8 @@ const fs = require('fs');
 const crypto = require('crypto');
 const nodemailer = require('nodemailer');
 const cors = require('cors');
+const PDFDocument = require('pdfkit'); // Add PDF generation library
+const QRCode = require('qrcode'); // Add QR code generation library
 require('dotenv').config({ path: path.join(__dirname, process.env.NODE_ENV === 'production' ? '.env.production' : '.env') });
 
 const app = express();
@@ -98,7 +100,7 @@ function validiereToken(token) {
 
 // Middleware: Token-Authentifizierung
 function authentifiziere(req, res, next) {
-  const token = req.query.token;
+  const token = req.query.token || req.headers['authorization'];
 
   if (!token) {
     console.error('Fehler: Kein Token bereitgestellt.');
@@ -160,7 +162,7 @@ app.get('/inlet', authentifiziere, (req, res) => {
 });
 
 // GET: Verfügbare Tickets
-app.get('/api/verbleibend', async (req, res) => {
+app.get('/api/verbleibend', authentifiziere, async (req, res) => {
   console.log('Route /api/verbleibend aufgerufen.');
   try {
     const config = JSON.parse(fs.readFileSync(path.join(__dirname, 'config.json'), 'utf8'));
@@ -174,7 +176,7 @@ app.get('/api/verbleibend', async (req, res) => {
 });
 
 // GET: Fetch all tickets
-app.get('/api/tickets', async (req, res) => {
+app.get('/api/tickets', authentifiziere, async (req, res) => {
   try {
     const tickets = await ladeBisherigeTickets();
     res.json(tickets);
@@ -197,7 +199,7 @@ const transporter = nodemailer.createTransport({
 function sendeBestellEmail(email, bestellnummer, gesamtpreis, anzahlTickets) {
   return new Promise((resolve, reject) => {
     const mailOptions = {
-      from: 'abschlusstickets@gmail.com', // Replace with your email
+      from: process.env.EMAIL_USER, // Verwenden Sie die Umgebungsvariable
       to: email,
       subject: 'Deine Ticketbestellung für die Abschlussparty 2025',
       text: `Hallo,
@@ -225,7 +227,7 @@ Dein Orga-Team der Abschlussparty 2025`
     transporter.sendMail(mailOptions, (error, info) => {
       if (error) {
         console.error('Fehler beim Senden der E-Mail:', error);
-        reject(error);
+        reject(new Error('E-Mail konnte nicht gesendet werden.'));
       } else {
         console.log('E-Mail gesendet:', info.response);
         resolve(true);
@@ -234,8 +236,76 @@ Dein Orga-Team der Abschlussparty 2025`
   });
 }
 
+// Function to generate a PDF with tickets and QR codes
+async function generateTicketPDF(tickets) {
+  const doc = new PDFDocument();
+  const buffers = [];
+
+  doc.on('data', buffers.push.bind(buffers));
+  doc.on('end', () => {});
+
+  doc.fontSize(20).text('Deine Tickets für die Abschlussparty 2025', { align: 'center' });
+  doc.moveDown();
+
+  for (const ticket of tickets) {
+    const qrCodeData = await QRCode.toDataURL(ticket.token);
+    doc.fontSize(14).text(`Ticketnummer: ${ticket.nummer}`);
+    doc.image(qrCodeData, { fit: [150, 150], align: 'center' });
+    doc.moveDown();
+  }
+
+  doc.end();
+  return Buffer.concat(buffers);
+}
+
+// Function to send ticket emails
+async function sendTicketEmails() {
+  try {
+    const { rows: paidOrders } = await pool.query(
+      'SELECT * FROM tickets WHERE gezahlt = TRUE AND scanned = FALSE'
+    );
+
+    for (const order of paidOrders) {
+      const tickets = Array.from({ length: order.anzahl_tickets }, (_, i) => ({
+        nummer: order.letzte_ticketnummer - order.anzahl_tickets + i + 1,
+        token: order.token,
+      }));
+
+      const pdfBuffer = await generateTicketPDF(tickets);
+
+      const mailOptions = {
+        from: process.env.EMAIL_USER,
+        to: order.email,
+        subject: 'Deine Tickets für die Abschlussparty 2025',
+        text: `Hallo ${order.vorname} ${order.name},
+
+anbei findest du deine Tickets für die Abschlussparty 2025. Bitte bringe die Tickets in digitaler oder ausgedruckter Form mit.
+
+Wir freuen uns auf dich!
+
+Herzliche Grüße,
+Dein Orga-Team der Abschlussparty 2025`,
+        attachments: [
+          {
+            filename: 'tickets.pdf',
+            content: pdfBuffer,
+          },
+        ],
+      };
+
+      await transporter.sendMail(mailOptions);
+      console.log(`Tickets für ${order.email} gesendet.`);
+    }
+  } catch (error) {
+    console.error('Fehler beim Senden der Ticket-E-Mails:', error);
+  }
+}
+
+// Schedule the function to run every 30 minutes
+setInterval(sendTicketEmails, 30 * 60 * 1000);
+
 // POST: Ticketkauf
-app.post('/api/tickets', async (req, res) => {
+app.post('/api/tickets', authentifiziere, async (req, res) => {
   const { vorname, name, email, anzahl_tickets } = req.body;
   if (!vorname || !name || !email || !anzahl_tickets) {
     return res.status(400).json({ message: 'Alle Felder müssen ausgefüllt sein.' });
@@ -256,24 +326,29 @@ app.post('/api/tickets', async (req, res) => {
       return res.status(400).json({ message: 'Sie haben bereits Tickets gekauft.' });
     }
 
+    // Bestellnummer im Schema GFS2025-0000 generieren
+    const { rows: lastOrderRows } = await pool.query('SELECT MAX(id) AS max_id FROM tickets');
+    const neue_bestellnummer = `GFS2025-${String((lastOrderRows[0].max_id || 0) + 1).padStart(4, '0')}`;
+
     const { rows: lastTicketRows } = await pool.query('SELECT MAX(letzte_ticketnummer) AS letzte_ticketnummer FROM tickets');
     const letzte_ticketnummer = lastTicketRows[0].letzte_ticketnummer || 25000;
     const neue_ticketnummern = Array.from({ length: anzahl_tickets }, (_, i) => letzte_ticketnummer + i + 1);
-    const bestellnummer = `GFS2025-${String(Date.now()).slice(-4)}`;
-    const token = crypto.createHash('sha256').update(`${bestellnummer}${email}`).digest('hex');
+
+    const token = crypto.createHash('sha256').update(`${neue_bestellnummer}${email}`).digest('hex');
     const gesamtpreis = 49.99 + (anzahl_tickets - 1) * 12.49;
 
     const neuer_eintrag = {
       vorname, name, email, anzahl_tickets,
       zeitpunkt: new Date().toISOString(),
       letzte_ticketnummer: neue_ticketnummern[neue_ticketnummern.length - 1],
-      bestellnummer, gesamtpreis, token
+      bestellnummer: neue_bestellnummer,
+      gesamtpreis, token
     };
 
     const ticket = await speichereTicket(neuer_eintrag);
     res.status(201).json({
       message: 'Tickets erfolgreich gekauft.',
-      bestellnummer,
+      bestellnummer: neue_bestellnummer,
       gesamtpreis,
       tickets: neue_ticketnummern.map(nr => ({ nummer: nr })),
       token
@@ -285,7 +360,7 @@ app.post('/api/tickets', async (req, res) => {
 });
 
 // Entferne SQLite-bezogene Funktionen und ersetze sie durch PostgreSQL-Abfragen
-app.post('/api/tickets/:bestellnummer/resend-email', async (req, res) => {
+app.post('/api/tickets/:bestellnummer/resend-email', authentifiziere, async (req, res) => {
   const { bestellnummer } = req.params;
 
   try {
@@ -304,7 +379,7 @@ app.post('/api/tickets/:bestellnummer/resend-email', async (req, res) => {
 });
 
 // PATCH: Update payment status
-app.patch('/api/tickets/:bestellnummer/gezahlt', async (req, res) => {
+app.patch('/api/tickets/:bestellnummer/gezahlt', authentifiziere, async (req, res) => {
   const { bestellnummer } = req.params;
   try {
     const { rowCount } = await pool.query('UPDATE tickets SET gezahlt = TRUE WHERE bestellnummer = $1', [bestellnummer]);
@@ -319,7 +394,7 @@ app.patch('/api/tickets/:bestellnummer/gezahlt', async (req, res) => {
 });
 
 // Ändere die QR-Code-Validierungsroute, um PostgreSQL zu verwenden
-app.post('/api/validate-ticket', async (req, res) => {
+app.post('/api/validate-ticket', authentifiziere, async (req, res) => {
   const { token } = req.body;
 
   if (!token) {
