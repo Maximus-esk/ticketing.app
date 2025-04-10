@@ -36,12 +36,18 @@ async function initializeDatabase() {
         email TEXT NOT NULL,
         anzahl_tickets INTEGER NOT NULL,
         zeitpunkt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        letzte_ticketnummer INTEGER,
         bestellnummer TEXT UNIQUE NOT NULL,
         gesamtpreis REAL NOT NULL,
-        gezahlt BOOLEAN DEFAULT FALSE,
+        gezahlt BOOLEAN DEFAULT FALSE
+      );
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS ticket_numbers (
+        id SERIAL PRIMARY KEY,
+        ticketnummer TEXT UNIQUE NOT NULL,
         token TEXT UNIQUE NOT NULL,
-        scanned BOOLEAN DEFAULT FALSE
+        bestellnummer TEXT NOT NULL REFERENCES tickets(bestellnummer)
       );
     `);
   } finally {
@@ -49,6 +55,28 @@ async function initializeDatabase() {
   }
 }
 initializeDatabase().catch(console.error);
+
+async function generiereTicketnummer(email) {
+  const client = await pool.connect();
+  try {
+    for (let i = 1; i <= 200; i++) {
+      const nummer = String(i).padStart(3, '0');
+      const token = crypto.createHash('sha256').update(`${nummer}${email}`).digest('hex');
+      try {
+        await client.query(
+          'INSERT INTO ticket_numbers (ticketnummer, token, bestellnummer) VALUES ($1, $2, NULL)',
+          [nummer, token]
+        );
+        return { nummer, token }; // Gibt die erste verfügbare Nummer und den Token zurück
+      } catch {
+        // Ignoriere Fehler, wenn die Nummer bereits existiert
+      }
+    }
+    throw new Error('Keine verfügbaren Ticketnummern mehr.');
+  } finally {
+    client.release();
+  }
+}
 
 // Helper functions
 async function ladeBisherigeTickets() {
@@ -119,6 +147,9 @@ function authentifiziere(req, res, next) {
   next();
 }
 
+// Freigabe der öffentlichen Dateien
+app.use(express.static(path.join(__dirname, '../public')));
+
 // Kombinierte Route: Ticketing und Bestellwesen
 app.get('/ticketing', authentifiziere, async (req, res) => {
   console.log('Route /ticketing aufgerufen.');
@@ -143,8 +174,9 @@ app.get('/inlet', authentifiziere, (req, res) => {
   res.redirect(`${process.env.CORS_ORIGIN}/inlet.html`);
 });
 
+// API-Routen ohne Token-Authentifizierung
 // GET: Verfügbare Tickets
-app.get('/api/verbleibend', authentifiziere, async (req, res) => {
+app.get('/api/verbleibend', async (req, res) => {
   console.log('Route /api/verbleibend aufgerufen.'); // Debug log
   try {
     const configPath = path.join(__dirname, 'config.json');
@@ -161,7 +193,7 @@ app.get('/api/verbleibend', authentifiziere, async (req, res) => {
 });
 
 // GET: Fetch all tickets
-app.get('/api/tickets', authentifiziere, async (req, res) => {
+app.get('/api/tickets', async (req, res) => {
   try {
     const tickets = await ladeBisherigeTickets();
     res.json(tickets);
@@ -289,10 +321,10 @@ Dein Orga-Team der Abschlussparty 2025`,
 // Schedule the function to run every 30 minutes
 setInterval(sendTicketEmails, 30 * 60 * 1000);
 
-// POST: Ticketkauf
-app.post('/api/tickets', authentifiziere, async (req, res) => {
+// POST: Ticketkauf (ohne Token-Authentifizierung)
+app.post('/api/tickets', async (req, res) => {
   const { vorname, name, email, anzahl_tickets } = req.body;
-  if (!vorname || !name || !email || anzahl_tickets) {
+  if (!vorname || !name || !email || !anzahl_tickets) {
     return res.status(400).json({ message: 'Alle Felder müssen ausgefüllt sein.' });
   }
   if (anzahl_tickets < 1 || anzahl_tickets > 10) {
@@ -311,32 +343,49 @@ app.post('/api/tickets', authentifiziere, async (req, res) => {
       return res.status(400).json({ message: 'Sie haben bereits Tickets gekauft.' });
     }
 
-    // Bestellnummer im Schema GFS2025-0000 generieren
-    const { rows: lastOrderRows } = await pool.query('SELECT MAX(id) AS max_id FROM tickets');
-    const neue_bestellnummer = `GFS2025-${String((lastOrderRows[0].max_id || 0) + 1).padStart(4, '0')}`;
-
-    const { rows: lastTicketRows } = await pool.query('SELECT MAX(letzte_ticketnummer) AS letzte_ticketnummer FROM tickets');
-    const letzte_ticketnummer = lastTicketRows[0].letzte_ticketnummer || 25000;
-    const neue_ticketnummern = Array.from({ length: anzahl_tickets }, (_, i) => letzte_ticketnummer + i + 1);
-
-    const token = crypto.createHash('sha256').update(`${neue_bestellnummer}${email}`).digest('hex');
+    const neue_bestellnummer = `GFS2025-${String(Date.now()).slice(-4)}`;
     const gesamtpreis = 49.99 + (anzahl_tickets - 1) * 12.49;
 
-    const neuer_eintrag = {
-      vorname, name, email, anzahl_tickets,
-      zeitpunkt: new Date().toISOString(),
-      letzte_ticketnummer: neue_ticketnummern[neue_ticketnummern.length - 1],
-      bestellnummer: neue_bestellnummer,
-      gesamtpreis, token
-    };
+    const ticketnummern = [];
+    for (let i = 0; i < anzahl_tickets; i++) {
+      const { nummer, token } = await generiereTicketnummer(email);
+      ticketnummern.push({ nummer, token });
+    }
 
-    const ticket = await speichereTicket(neuer_eintrag);
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const query = `
+        INSERT INTO tickets (vorname, name, email, anzahl_tickets, zeitpunkt, bestellnummer, gesamtpreis)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        RETURNING *;
+      `;
+      const values = [
+        vorname, name, email, anzahl_tickets,
+        new Date().toISOString(), neue_bestellnummer, gesamtpreis
+      ];
+      await client.query(query, values);
+
+      for (const { nummer, token } of ticketnummern) {
+        await client.query(
+          'UPDATE ticket_numbers SET bestellnummer = $1 WHERE ticketnummer = $2',
+          [neue_bestellnummer, nummer]
+        );
+      }
+
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+
     res.status(201).json({
       message: 'Tickets erfolgreich gekauft.',
       bestellnummer: neue_bestellnummer,
       gesamtpreis,
-      tickets: neue_ticketnummern.map(nr => ({ nummer: nr })),
-      token
+      tickets: ticketnummern
     });
   } catch (error) {
     console.error('Error saving ticket:', error);
@@ -344,8 +393,8 @@ app.post('/api/tickets', authentifiziere, async (req, res) => {
   }
 });
 
-// POST: Resend confirmation email
-app.post('/api/tickets/:bestellnummer/resend-email', authentifiziere, async (req, res) => {
+// POST: Resend confirmation email (ohne Token-Authentifizierung)
+app.post('/api/tickets/:bestellnummer/resend-email', async (req, res) => {
   const { bestellnummer } = req.params;
 
   try {
