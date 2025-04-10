@@ -101,57 +101,74 @@ function authentifiziere(req, res, next) {
   const token = req.query.token;
 
   if (!token) {
+    console.error('Fehler: Kein Token bereitgestellt.');
     return res.status(401).sendFile(path.join(__dirname, '../public/unauthorized.html'));
   }
 
   const benutzer = validiereToken(token);
 
   if (!benutzer) {
+    console.error('Fehler: Ungültiger Token.');
     return res.status(403).sendFile(path.join(__dirname, '../public/unauthorized.html'));
   }
 
+  console.log(`Benutzer authentifiziert: ${benutzer.username}`);
   req.benutzer = benutzer;
   next();
 }
 
 // Kombinierte Route: Ticketing und Bestellwesen
-app.get('/ticketing', authentifiziere, (req, res) => {
+app.get('/ticketing', authentifiziere, async (req, res) => {
+  console.log('Route /ticketing aufgerufen.');
   if (req.benutzer.recht !== 'Admin' && req.benutzer.recht !== 'Purchase') {
+    console.error('Fehler: Keine Berechtigung für Ticketing.');
     return res.status(403).json({ error: 'Keine Berechtigung für Ticketing' });
   }
 
   // Prüfe, ob JSON-Daten oder HTML-Datei angefordert wird
   if (req.headers.accept && req.headers.accept.includes('application/json')) {
-    ladeBisherigeTickets((tickets) => {
+    try {
+      const tickets = await ladeBisherigeTickets();
+      console.log('Tickets erfolgreich geladen:', tickets.length);
       res.json({ tickets });
-    });
+    } catch (error) {
+      console.error('Fehler beim Laden der Tickets:', error);
+      res.status(500).json({ error: 'Fehler beim Laden der Tickets.' });
+    }
   } else {
+    console.log('HTML-Datei für Ticketing wird gesendet.');
     res.sendFile(path.join(__dirname, '../public/ticketing.html'));
   }
 });
 
 // Kombinierte Route: Inlet und Ticketscanner
 app.get('/inlet', authentifiziere, (req, res) => {
+  console.log('Route /inlet aufgerufen.');
   if (req.benutzer.recht !== 'Admin' && req.benutzer.recht !== 'Scanner') {
+    console.error('Fehler: Keine Berechtigung für Inlet.');
     return res.status(403).json({ error: 'Keine Berechtigung für Inlet' });
   }
 
   // Prüfe, ob JSON-Daten oder HTML-Datei angefordert wird
   if (req.headers.accept && req.headers.accept.includes('application/json')) {
+    console.log('JSON-Daten für Inlet werden gesendet.');
     res.json({ message: 'Zugriff auf Ticketscanner erlaubt' });
   } else {
+    console.log('HTML-Datei für Inlet wird gesendet.');
     res.sendFile(path.join(__dirname, '../public/inlet.html'));
   }
 });
 
 // GET: Verfügbare Tickets
 app.get('/api/verbleibend', async (req, res) => {
+  console.log('Route /api/verbleibend aufgerufen.');
   try {
     const config = JSON.parse(fs.readFileSync(path.join(__dirname, 'config.json'), 'utf8'));
     const verbleibend = await berechneVerbleibend(config.maxTickets);
+    console.log(`Verbleibende Tickets: ${verbleibend}`);
     res.json({ verbleibend });
   } catch (error) {
-    console.error('Error calculating remaining tickets:', error);
+    console.error('Fehler beim Berechnen der verbleibenden Tickets:', error);
     res.status(500).json({ message: 'Fehler beim Berechnen der verbleibenden Tickets.' });
   }
 });
