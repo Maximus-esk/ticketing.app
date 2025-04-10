@@ -104,14 +104,14 @@ function authentifiziere(req, res, next) {
 
   if (!token) {
     console.error('Fehler: Kein Token bereitgestellt.');
-    return res.status(401).sendFile(path.join(__dirname, '../public/unauthorized.html'));
+    return res.status(401).sendFile(path.join(__dirname, '../unauthorized.html'));
   }
 
   const benutzer = validiereToken(token);
 
   if (!benutzer) {
     console.error('Fehler: Ungültiger Token.');
-    return res.status(403).sendFile(path.join(__dirname, '../public/unauthorized.html'));
+    return res.status(403).sendFile(path.join(__dirname, '../unauthorized.html'));
   }
 
   console.log(`Benutzer authentifiziert: ${benutzer.username}`);
@@ -163,14 +163,15 @@ app.get('/inlet', authentifiziere, (req, res) => {
 
 // GET: Verfügbare Tickets
 app.get('/api/verbleibend', authentifiziere, async (req, res) => {
-  console.log('Route /api/verbleibend aufgerufen.');
+  console.log('Route /api/verbleibend aufgerufen.'); // Debug log
   try {
     const config = JSON.parse(fs.readFileSync(path.join(__dirname, 'config.json'), 'utf8'));
+    console.log('Config geladen:', config); // Debug log
     const verbleibend = await berechneVerbleibend(config.maxTickets);
-    console.log(`Verbleibende Tickets: ${verbleibend}`);
+    console.log(`Verbleibende Tickets: ${verbleibend}`); // Debug log
     res.json({ verbleibend });
   } catch (error) {
-    console.error('Fehler beim Berechnen der verbleibenden Tickets:', error);
+    console.error('Fehler beim Berechnen der verbleibenden Tickets:', error); // Debug log
     res.status(500).json({ message: 'Fehler beim Berechnen der verbleibenden Tickets.' });
   }
 });
