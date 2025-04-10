@@ -33,7 +33,20 @@ app.get('/api/tickets', (req, res) => {
 
 
 app.use(cors({
-  origin: process.env.CORS_ORIGIN, // Set your frontend URL here
+  origin: function (origin, callback) {
+    const allowedOrigins = [
+      'https://abschlusstickets.de',
+      'https://www.abschlusstickets.de',
+      'https://shimmering-narwhal-d31aaf.netlify.app'
+    ];
+  
+    // erlaubt Server-zu-Server-Requests (z. B. Cronjobs, Postman)
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('CORS error: Origin not allowed → ' + origin));
+    }
+  }
   methods: ['GET', 'POST', 'PATCH'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   exposedHeaders: ['Authorization'],
