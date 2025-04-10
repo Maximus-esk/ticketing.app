@@ -1,6 +1,14 @@
 const path = require('path'); // Ensure path is required before using it
-const envFile = process.env.NODE_ENV === 'production' ? '.env.production' : '.env.development';
-require('dotenv').config({ path: path.join(__dirname, envFile) }); // Load environment variables from the correct .env file
+
+// Ensure NODE_ENV has a default value
+const NODE_ENV = process.env.NODE_ENV || 'development';
+
+// Determine the correct .env file based on NODE_ENV
+const envFile = NODE_ENV === 'production' ? '.env.production' : '.env';
+
+// Load environment variables from the correct .env file
+require('dotenv').config({ path: path.join(__dirname, envFile) });
+
 const express = require('express');
 const fs = require('fs');
 const crypto = require('crypto'); // Add crypto module for token generation
@@ -25,7 +33,7 @@ app.get('/api/tickets', (req, res) => {
 
 
 app.use(cors({
-  origin: process.env.CORS_ORIGIN || 'http://localhost:3000', // Set your frontend URL here
+  origin: process.env.CORS_ORIGIN, // Set your frontend URL here
   methods: ['GET', 'POST', 'PATCH'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   exposedHeaders: ['Authorization'],
@@ -140,28 +148,32 @@ const transporter = nodemailer.createTransport({
 });
 
 // Function to send email
-function sendeBestellEmail(email, bestellnummer, gesamtpreis) {
+function sendeBestellEmail(email, bestellnummer, gesamtpreis, anzahlTickets) {
   return new Promise((resolve, reject) => {
     const mailOptions = {
       from: 'abschlusstickets@gmail.com', // Replace with your email
       to: email,
-      subject: 'Ticketbestellung - Abschlussparty 2025',
-      text: `Vielen Dank für die Bestellung!
+      subject: 'Deine Ticketbestellung für die Abschlussparty 2025',
+      text: `Hallo,
 
-Hier sind die Zahlungsinformationen um den Bestellvorgang abzuschließen:
+vielen Dank, dass du Tickets für unsere Abschlussparty 2025 bestellt hast! Wir freuen uns sehr, dass du dabei sein möchtest.
+
+Hier sind die Zahlungsinformationen, um deine Bestellung abzuschließen:
 Empfänger: Frida Stein
 IBAN: DE37370502990045079818
 Verwendungszweck: ${bestellnummer}
 
-Bitte prüfe und überweise den Gesamtbetrag von ${gesamtpreis.toFixed(2)} € auf das oben genannte Konto.
+Anzahl der bestellten Tickets: ${anzahlTickets}
+Gesamtbetrag: ${gesamtpreis.toFixed(2)} €
 
-Nach Eingang der Zahlung werden die Tickets per E-Mail zugeschickt.
-Dieser Vorgang kann bis zu einer Woche dauern.
+Bitte überweise den Gesamtbetrag auf das oben genannte Konto. Sobald die Zahlung bei uns eingegangen ist, senden wir dir die Tickets per E-Mail zu. Bitte beachte, dass der Überweisungsprozess bis zu 3 Werktage dauern und die Bearbeitung deiner Bestellung bis zu einer Woche in Anspruch nehmen kann.
 
-Vielen Dank und wir freuen uns aufs Feiern mit Euch!
+Falls du Fragen hast oder Unterstützung benötigst, zögere nicht, uns in der Schule anzusprechen. Wir sind gerne für dich da.
 
-Beste Grüße,
-Euer Organisationsteam`
+Vielen Dank für dein Vertrauen und deine Unterstützung. Wir freuen uns schon darauf, mit dir zu feiern!
+
+Herzliche Grüße,  
+Dein Orga-Team der Abschlussparty 2025`
     };
 
     transporter.sendMail(mailOptions, (error, info) => {
@@ -242,7 +254,7 @@ app.post('/api/tickets', async (req, res) => {
 
   // Send confirmation email
   try {
-    await sendeBestellEmail(email, bestellnummer, gesamtpreis);
+    await sendeBestellEmail(email, bestellnummer, gesamtpreis, anzahl_tickets);
     res.status(201).json({
       message: 'Tickets erfolgreich gekauft. Eine Bestätigungs-E-Mail wurde an Ihre Adresse gesendet.',
       emailSent: true,
@@ -281,7 +293,7 @@ app.post('/api/tickets/:bestellnummer/resend-email', async (req, res) => {
   }
 
   try {
-    await sendeBestellEmail(ticket.email, ticket.bestellnummer, ticket.gesamtpreis);
+    await sendeBestellEmail(ticket.email, ticket.bestellnummer, ticket.gesamtpreis, ticket.anzahl_tickets);
     res.json({ message: 'Die Bestätigungs-E-Mail wurde erfolgreich erneut gesendet.' });
   } catch (error) {
     console.error('Fehler beim erneuten Senden der E-Mail:', error);
