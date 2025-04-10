@@ -1,3 +1,4 @@
+const cors = require("cors");
 const path = require('path'); // Ensure path is required before using it
 
 // Ensure NODE_ENV has a default value
@@ -15,23 +16,7 @@ const crypto = require('crypto'); // Add crypto module for token generation
 const nodemailer = require('nodemailer'); // Add nodemailer for email sending
 const app = express();
 
-app.use(express.json());
-app.use(express.static(path.join(__dirname, '../public'))); // Serve static files from the public folder
-
-const DATA_FILE = path.join(__dirname, 'tickets.json');
-const CONFIG_FILE = path.join(__dirname, 'config.json');
-const ADMIN_FILE = path.join(__dirname, 'administration.json');
-
-const ORDER_NUMBER_FORMAT = "GFS2025"; // Format für Bestellnummer
-
-const cors = require("cors");
-
-app.get('/api/tickets', (req, res) => {
-  const tickets = ladeBisherigeTickets();
-  res.json(tickets);
-});
-
-
+// CORS-Middleware sollte vor den anderen Middlewares und Routen stehen
 app.use(cors({
   origin: function (origin, callback) {
     const allowedOrigins = [
@@ -56,6 +41,19 @@ app.use(cors({
   credentials: true
 }));
 
+app.use(express.json());
+app.use(express.static(path.join(__dirname, '../public'))); // Serve static files from the public folder
+
+const DATA_FILE = path.join(__dirname, 'tickets.json');
+const CONFIG_FILE = path.join(__dirname, 'config.json');
+const ADMIN_FILE = path.join(__dirname, 'administration.json');
+
+const ORDER_NUMBER_FORMAT = "GFS2025"; // Format für Bestellnummer
+
+app.get('/api/tickets', (req, res) => {
+  const tickets = ladeBisherigeTickets();
+  res.json(tickets);
+});
 
 // Hilfsfunktionen
 function ladeKonfiguration() {
