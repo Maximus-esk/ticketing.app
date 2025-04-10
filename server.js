@@ -204,6 +204,20 @@ app.get('/api/tickets', async (req, res) => {
   }
 });
 
+// GET: Fetch unpaid orders
+app.get('/api/unpaid-orders', async (req, res) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT * FROM tickets 
+      WHERE gezahlt = FALSE AND zeitpunkt <= NOW() - INTERVAL '7 days'
+    `);
+    res.json(rows);
+  } catch (error) {
+    console.error('Fehler beim Abrufen der unbezahlten Bestellungen:', error);
+    res.status(500).json({ message: 'Fehler beim Abrufen der unbezahlten Bestellungen.' });
+  }
+});
+
 // Configure nodemailer transporter
 const transporter = nodemailer.createTransport({
   service: 'gmail', // Use your email provider
@@ -439,6 +453,43 @@ app.post('/api/tickets/:bestellnummer/resend-email', async (req, res) => {
   }
 });
 
+// POST: Send reminder email for unpaid orders
+app.post('/api/tickets/:bestellnummer/send-reminder', async (req, res) => {
+  const { bestellnummer } = req.params;
+
+  try {
+    const { rows } = await pool.query('SELECT * FROM tickets WHERE bestellnummer = $1', [bestellnummer]);
+    if (rows.length === 0) {
+      return res.status(404).json({ message: 'Bestellnummer nicht gefunden.' });
+    }
+
+    const ticket = rows[0];
+    await transporter.sendMail({
+      from: process.env.EMAIL_USER,
+      to: ticket.email,
+      subject: 'Erinnerung: Ihre Ticketreservierung läuft bald ab',
+      text: `Hallo ${ticket.vorname} ${ticket.name},
+
+Ihre Ticketreservierung für die Abschlussparty 2025 läuft in einer Woche ab. Bitte überweisen Sie den Betrag von ${ticket.gesamtpreis.toFixed(2)} € an:
+
+Empfänger: Frida Stein
+IBAN: DE37370502990045079818
+Verwendungszweck: ${ticket.bestellnummer}
+
+Falls keine Zahlung eingeht, wird Ihre Reservierung automatisch gelöscht.
+
+Vielen Dank,
+Ihr Orga-Team der Abschlussparty 2025`
+    });
+
+    await pool.query('UPDATE tickets SET reminder_sent = TRUE WHERE bestellnummer = $1', [bestellnummer]);
+    res.json({ message: 'Erinnerungs-E-Mail erfolgreich gesendet.' });
+  } catch (error) {
+    console.error('Fehler beim Senden der Erinnerungs-E-Mail:', error);
+    res.status(500).json({ message: 'Fehler beim Senden der Erinnerungs-E-Mail.' });
+  }
+});
+
 // PATCH: Update payment status
 app.patch('/api/tickets/:bestellnummer/gezahlt', authentifiziere, async (req, res) => {
   const { bestellnummer } = req.params;
@@ -497,6 +548,22 @@ app.delete('/api/tickets/:id', authentifiziere, async (req, res) => {
   } catch (error) {
     console.error('Fehler beim Löschen des Tickets:', error);
     res.status(500).json({ message: 'Fehler beim Löschen des Tickets.' });
+  }
+});
+
+// DELETE: Remove unpaid orders after 2 weeks
+app.delete('/api/tickets/:bestellnummer', async (req, res) => {
+  const { bestellnummer } = req.params;
+
+  try {
+    const { rowCount } = await pool.query('DELETE FROM tickets WHERE bestellnummer = $1 AND gezahlt = FALSE', [bestellnummer]);
+    if (rowCount === 0) {
+      return res.status(404).json({ message: 'Bestellung nicht gefunden oder bereits bezahlt.' });
+    }
+    res.json({ message: 'Unbezahlte Bestellung erfolgreich gelöscht.' });
+  } catch (error) {
+    console.error('Fehler beim Löschen der unbezahlten Bestellung:', error);
+    res.status(500).json({ message: 'Fehler beim Löschen der unbezahlten Bestellung.' });
   }
 });
 
