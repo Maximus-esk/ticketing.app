@@ -104,14 +104,14 @@ function authentifiziere(req, res, next) {
 
   if (!token) {
     console.error('Fehler: Kein Token bereitgestellt.');
-    return res.status(401).sendFile(path.join(__dirname, '../public/unauthorized.html')); // Corrected path
+    return res.redirect(`${process.env.CORS_ORIGIN}/unauthorized.html`); // Redirect to frontend unauthorized page
   }
 
   const benutzer = validiereToken(token);
 
   if (!benutzer) {
     console.error('Fehler: Ungültiger Token.');
-    return res.status(403).sendFile(path.join(__dirname, '../public/unauthorized.html')); // Corrected path
+    return res.redirect(`${process.env.CORS_ORIGIN}/unauthorized.html`); // Redirect to frontend unauthorized page
   }
 
   console.log(`Benutzer authentifiziert: ${benutzer.username}`);
@@ -124,23 +124,11 @@ app.get('/ticketing', authentifiziere, async (req, res) => {
   console.log('Route /ticketing aufgerufen.');
   if (req.benutzer.recht !== 'Admin' && req.benutzer.recht !== 'Purchase') {
     console.error('Fehler: Keine Berechtigung für Ticketing.');
-    return res.status(403).json({ error: 'Keine Berechtigung für Ticketing' });
+    return res.redirect(`${process.env.CORS_ORIGIN}/unauthorized.html`); // Redirect to frontend unauthorized page
   }
 
-  // Prüfe, ob JSON-Daten oder HTML-Datei angefordert wird
-  if (req.headers.accept && req.headers.accept.includes('application/json')) {
-    try {
-      const tickets = await ladeBisherigeTickets();
-      console.log('Tickets erfolgreich geladen:', tickets.length);
-      res.json({ tickets });
-    } catch (error) {
-      console.error('Fehler beim Laden der Tickets:', error);
-      res.status(500).json({ error: 'Fehler beim Laden der Tickets.' });
-    }
-  } else {
-    console.log('HTML-Datei für Ticketing wird gesendet.');
-    res.sendFile(path.join(__dirname, '../public/ticketing.html'));
-  }
+  // Redirect to the frontend ticketing page
+  res.redirect(`${process.env.CORS_ORIGIN}/ticketing.html`);
 });
 
 // Kombinierte Route: Inlet und Ticketscanner
@@ -148,17 +136,11 @@ app.get('/inlet', authentifiziere, (req, res) => {
   console.log('Route /inlet aufgerufen.');
   if (req.benutzer.recht !== 'Admin' && req.benutzer.recht !== 'Scanner') {
     console.error('Fehler: Keine Berechtigung für Inlet.');
-    return res.status(403).json({ error: 'Keine Berechtigung für Inlet' });
+    return res.redirect(`${process.env.CORS_ORIGIN}/unauthorized.html`); // Redirect to frontend unauthorized page
   }
 
-  // Prüfe, ob JSON-Daten oder HTML-Datei angefordert wird
-  if (req.headers.accept && req.headers.accept.includes('application/json')) {
-    console.log('JSON-Daten für Inlet werden gesendet.');
-    res.json({ message: 'Zugriff auf Ticketscanner erlaubt' });
-  } else {
-    console.log('HTML-Datei für Inlet wird gesendet.');
-    res.sendFile(path.join(__dirname, '../public/inlet.html'));
-  }
+  // Redirect to the frontend inlet page
+  res.redirect(`${process.env.CORS_ORIGIN}/inlet.html`);
 });
 
 // GET: Verfügbare Tickets
