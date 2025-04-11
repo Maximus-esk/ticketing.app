@@ -60,6 +60,15 @@ initializeDatabase().catch(console.error);
 async function generiereTicketnummer(email) {
   const client = await pool.connect();
   try {
+    // Prüfe auf ungenutzte Ticketnummern
+    const { rows: unusedTickets } = await client.query(
+      'SELECT ticketnummer, token FROM ticket_numbers WHERE bestellnummer IS NULL LIMIT 1'
+    );
+    if (unusedTickets.length > 0) {
+      return unusedTickets[0]; // Recycle eine ungenutzte Ticketnummer
+    }
+
+    // Generiere neue Ticketnummern, falls keine ungenutzten vorhanden sind
     for (let i = 1; i <= 200; i++) {
       const nummer = String(i).padStart(3, '0');
       const token = crypto.createHash('sha256').update(`${nummer}${email}`).digest('hex');
@@ -133,14 +142,14 @@ function authentifiziere(req, res, next) {
 
   if (!token) {
     console.error('Fehler: Kein Token bereitgestellt.');
-    return res.redirect(`${process.env.CORS_ORIGIN}/unauthorized.html`); // Redirect to frontend unauthorized page
+    return res.status(403).json({ redirect: '/unauthorized.html', message: 'Zugriff verweigert: Kein Token bereitgestellt.' });
   }
 
   const benutzer = validiereToken(token);
 
   if (!benutzer) {
     console.error('Fehler: Ungültiger Token.');
-    return res.redirect(`${process.env.CORS_ORIGIN}/unauthorized.html`); // Redirect to frontend unauthorized page
+    return res.status(403).json({ redirect: '/unauthorized.html', message: 'Zugriff verweigert: Ungültiger Token.' });
   }
 
   console.log(`Benutzer authentifiziert: ${benutzer.username}`);
@@ -156,7 +165,7 @@ app.get('/ticketing', authentifiziere, async (req, res) => {
   console.log('Route /ticketing aufgerufen.');
   if (req.benutzer.recht !== 'Admin' && req.benutzer.recht !== 'Purchase') {
     console.error('Fehler: Keine Berechtigung für Ticketing.');
-    return res.redirect(`${process.env.CORS_ORIGIN}/unauthorized.html`); // Redirect to frontend unauthorized page
+    return res.status(403).json({ message: 'Zugriff verweigert: Keine Berechtigung.' });
   }
 
   // Redirect to the frontend ticketing page
@@ -168,7 +177,7 @@ app.get('/inlet', authentifiziere, (req, res) => {
   console.log('Route /inlet aufgerufen.');
   if (req.benutzer.recht !== 'Admin' && req.benutzer.recht !== 'Scanner') {
     console.error('Fehler: Keine Berechtigung für Inlet.');
-    return res.redirect(`${process.env.CORS_ORIGIN}/unauthorized.html`); // Redirect to frontend unauthorized page
+    return res.status(403).json({ message: 'Zugriff verweigert: Keine Berechtigung.' });
   }
 
   // Redirect to the frontend inlet page
@@ -274,35 +283,42 @@ async function generateStyledTicketPDF(ticket, order) {
   const buffers = [];
 
   doc.on('data', buffers.push.bind(buffers));
-  doc.on('end', () => {});
-
-  // Header
-  doc.rect(0, 0, doc.page.width, 100).fill('#121212');
-  doc.fillColor('#f0e68c').fontSize(24).text('Abschlussparty 2025', { align: 'center', valign: 'center' });
-  doc.moveDown();
-
-  // Ticket details
-  doc.fillColor('#000').fontSize(16).text(`Ticketnummer: ${ticket.nummer}`, { align: 'left' });
-  doc.text(`Name: ${order.vorname} ${order.name}`, { align: 'left' });
-  doc.text(`E-Mail: ${order.email}`, { align: 'left' });
-  doc.text(`Bestellnummer: ${order.bestellnummer}`, { align: 'left' });
-  doc.text(`Preis: ${ticket.preis.toFixed(2)} €`, { align: 'left' });
-  doc.moveDown();
-
-  // QR Code
-  const qrCodeData = await QRCode.toDataURL(ticket.token);
-  doc.image(qrCodeData, { fit: [150, 150], align: 'center' });
-  doc.moveDown();
-
-  // Footer
-  doc.rect(0, doc.page.height - 50, doc.page.width, 50).fill('#121212');
-  doc.fillColor('#f0e68c').fontSize(12).text('Vielen Dank für deine Unterstützung! Wir freuen uns auf dich.', {
-    align: 'center',
-    valign: 'bottom',
+  doc.on('end', () => {
+    console.log('PDF-Generierung abgeschlossen.');
   });
 
-  doc.end();
-  return Buffer.concat(buffers);
+  try {
+    // Header
+    doc.rect(0, 0, doc.page.width, 100).fill('#121212');
+    doc.fillColor('#f0e68c').fontSize(24).text('Abschlussparty 2025', { align: 'center', valign: 'center' });
+    doc.moveDown();
+
+    // Ticket details
+    doc.fillColor('#000').fontSize(16).text(`Ticketnummer: ${ticket.nummer}`, { align: 'left' });
+    doc.text(`Name: ${order.vorname} ${order.name}`, { align: 'left' });
+    doc.text(`E-Mail: ${order.email}`, { align: 'left' });
+    doc.text(`Bestellnummer: ${order.bestellnummer}`, { align: 'left' });
+    doc.text(`Preis: ${ticket.preis.toFixed(2)} €`, { align: 'left' });
+    doc.moveDown();
+
+    // QR Code
+    const qrCodeData = await QRCode.toDataURL(ticket.token);
+    doc.image(qrCodeData, { fit: [150, 150], align: 'center' });
+    doc.moveDown();
+
+    // Footer
+    doc.rect(0, doc.page.height - 50, doc.page.width, 50).fill('#121212');
+    doc.fillColor('#f0e68c').fontSize(12).text('Vielen Dank für deine Unterstützung! Wir freuen uns auf dich.', {
+      align: 'center',
+      valign: 'bottom',
+    });
+
+    doc.end();
+    return Buffer.concat(buffers);
+  } catch (error) {
+    console.error('Fehler bei der PDF-Generierung:', error);
+    throw new Error('PDF konnte nicht generiert werden.');
+  }
 }
 
 // Function to send ticket emails with individual PDFs
@@ -585,15 +601,35 @@ app.delete('/api/tickets/:id', authentifiziere, async (req, res) => {
 app.delete('/api/tickets/:bestellnummer', async (req, res) => {
   const { bestellnummer } = req.params;
 
+  const client = await pool.connect();
   try {
-    const { rowCount } = await pool.query('DELETE FROM tickets WHERE bestellnummer = $1 AND gezahlt = FALSE', [bestellnummer]);
+    await client.query('BEGIN');
+
+    // Freigeben der Ticketnummern
+    await client.query(
+      'UPDATE ticket_numbers SET bestellnummer = NULL WHERE bestellnummer = $1',
+      [bestellnummer]
+    );
+
+    // Löschen der Bestellung
+    const { rowCount } = await client.query(
+      'DELETE FROM tickets WHERE bestellnummer = $1',
+      [bestellnummer]
+    );
+
     if (rowCount === 0) {
-      return res.status(404).json({ message: 'Bestellung nicht gefunden oder bereits bezahlt.' });
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Bestellung nicht gefunden.' });
     }
-    res.json({ message: 'Unbezahlte Bestellung erfolgreich gelöscht.' });
+
+    await client.query('COMMIT');
+    res.json({ message: 'Bestellung erfolgreich gelöscht und Ticketnummern freigegeben.' });
   } catch (error) {
-    console.error('Fehler beim Löschen der unbezahlten Bestellung:', error);
-    res.status(500).json({ message: 'Fehler beim Löschen der unbezahlten Bestellung.' });
+    await client.query('ROLLBACK');
+    console.error('Fehler beim Löschen der Bestellung:', error);
+    res.status(500).json({ message: 'Fehler beim Löschen der Bestellung.' });
+  } finally {
+    client.release();
   }
 });
 
@@ -601,15 +637,35 @@ app.delete('/api/tickets/:bestellnummer', async (req, res) => {
 app.delete('/api/tickets/:bestellnummer', async (req, res) => {
   const { bestellnummer } = req.params;
 
+  const client = await pool.connect();
   try {
-    const { rowCount } = await pool.query('DELETE FROM tickets WHERE bestellnummer = $1', [bestellnummer]);
+    await client.query('BEGIN');
+
+    // Entferne alle Ticketnummern, die mit der Bestellung verknüpft sind
+    await client.query(
+      'DELETE FROM ticket_numbers WHERE bestellnummer = $1',
+      [bestellnummer]
+    );
+
+    // Lösche die Bestellung
+    const { rowCount } = await client.query(
+      'DELETE FROM tickets WHERE bestellnummer = $1',
+      [bestellnummer]
+    );
+
     if (rowCount === 0) {
+      await client.query('ROLLBACK');
       return res.status(404).json({ message: 'Bestellung nicht gefunden.' });
     }
-    res.json({ message: 'Bestellung erfolgreich gelöscht.' });
+
+    await client.query('COMMIT');
+    res.json({ message: 'Bestellung und zugehörige Daten erfolgreich gelöscht.' });
   } catch (error) {
+    await client.query('ROLLBACK');
     console.error('Fehler beim Löschen der Bestellung:', error);
     res.status(500).json({ message: 'Fehler beim Löschen der Bestellung.' });
+  } finally {
+    client.release();
   }
 });
 
