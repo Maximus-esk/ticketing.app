@@ -60,26 +60,16 @@ initializeDatabase().catch(console.error);
 async function generiereTicketnummer(email) {
   const client = await pool.connect();
   try {
-    // Prüfe auf ungenutzte Ticketnummern
-    const { rows: unusedTickets } = await client.query(
-      'SELECT ticketnummer, token FROM ticket_numbers WHERE bestellnummer IS NULL LIMIT 1'
-    );
-    if (unusedTickets.length > 0) {
-      return unusedTickets[0]; // Recycle eine ungenutzte Ticketnummer
-    }
-
-    // Generiere neue Ticketnummern, falls keine ungenutzten vorhanden sind
+    // Suche nach der ersten freien Ticketnummer
     for (let i = 1; i <= 200; i++) {
       const nummer = String(i).padStart(3, '0');
       const token = crypto.createHash('sha256').update(`${nummer}${email}`).digest('hex');
-      try {
-        await client.query(
-          'INSERT INTO ticket_numbers (ticketnummer, token, bestellnummer) VALUES ($1, $2, NULL)',
-          [nummer, token]
-        );
+      const { rowCount } = await client.query(
+        'UPDATE ticket_numbers SET token = $1, bestellnummer = NULL WHERE ticketnummer = $2 AND bestellnummer IS NULL',
+        [token, nummer]
+      );
+      if (rowCount > 0) {
         return { nummer, token }; // Gibt die erste verfügbare Nummer und den Token zurück
-      } catch {
-        // Ignoriere Fehler, wenn die Nummer bereits existiert
       }
     }
     throw new Error('Keine verfügbaren Ticketnummern mehr.');
