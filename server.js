@@ -24,7 +24,7 @@ const pool = new Pool({
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
-// Initialize database schema
+// Update database schema to allow NULL for bestellnummer in ticket_numbers
 async function initializeDatabase() {
   const client = await pool.connect();
   try {
@@ -48,7 +48,7 @@ async function initializeDatabase() {
         id SERIAL PRIMARY KEY,
         ticketnummer TEXT UNIQUE NOT NULL,
         token TEXT UNIQUE NOT NULL,
-        bestellnummer TEXT NOT NULL REFERENCES tickets(bestellnummer)
+        bestellnummer TEXT REFERENCES tickets(bestellnummer) DEFAULT NULL
       );
     `);
   } finally {
@@ -56,57 +56,14 @@ async function initializeDatabase() {
   }
 }
 
-// Funktion zur Initialisierung der Tabelle ticket_numbers
-async function initializeTicketNumbers() {
-  const client = await pool.connect();
-  try {
-    const { rows } = await client.query('SELECT COUNT(*) AS count FROM ticket_numbers');
-    if (parseInt(rows[0].count, 10) < 200) {
-      console.log('Initialisiere fehlende Ticketnummern...');
-      const existingNumbers = new Set(
-        (await client.query('SELECT ticketnummer FROM ticket_numbers')).rows.map(row => row.ticketnummer)
-      );
-
-      const values = [];
-      for (let i = 1; i <= 200; i++) {
-        const nummer = String(i).padStart(3, '0');
-        if (!existingNumbers.has(nummer)) {
-          const token = crypto.createHash('sha256').update(nummer).digest('hex');
-          values.push(`('${nummer}', '${token}', NULL)`); // Sicherstellen, dass bestellnummer NULL ist
-        }
-      }
-
-      if (values.length > 0) {
-        await client.query(`INSERT INTO ticket_numbers (ticketnummer, token, bestellnummer) VALUES ${values.join(', ')}`);
-        console.log(`${values.length} fehlende Ticketnummern erfolgreich hinzugefügt.`);
-      } else {
-        console.log('Alle Ticketnummern sind bereits vorhanden.');
-      }
-    }
-
-    // Validierung: Sicherstellen, dass keine Ticketnummern fälschlicherweise blockiert sind
-    await client.query('UPDATE ticket_numbers SET bestellnummer = NULL WHERE bestellnummer IS NOT NULL AND NOT EXISTS (SELECT 1 FROM tickets WHERE bestellnummer = ticket_numbers.bestellnummer)');
-    console.log('Ungültige Ticketnummern wurden freigegeben.');
-  } catch (error) {
-    console.error('Fehler bei der Initialisierung der Ticketnummern:', error);
-  } finally {
-    client.release();
-  }
-}
-
-// Initialisierung der Datenbank und Ticketnummern
-initializeDatabase()
-  .then(() => initializeTicketNumbers())
-  .catch(console.error);
-
+// Simplify ticket number generation logic
 async function generiereTicketnummer(email) {
   const client = await pool.connect();
   try {
-    // Finde die höchste existierende Ticketnummer
+    // Find the next available ticket number
     const { rows } = await client.query('SELECT MAX(ticketnummer::INTEGER) AS max_nummer FROM ticket_numbers');
     const maxNummer = rows[0].max_nummer || 0;
 
-    // Berechne die nächste Ticketnummer
     const neueNummer = maxNummer + 1;
     if (neueNummer > 999) {
       throw new Error('Keine verfügbaren Ticketnummern mehr.');
@@ -115,9 +72,9 @@ async function generiereTicketnummer(email) {
     const nummer = String(neueNummer).padStart(3, '0');
     const token = crypto.createHash('sha256').update(`${nummer}${email}`).digest('hex');
 
-    // Erstelle die neue Ticketnummer
+    // Insert the new ticket number
     await client.query(
-      'INSERT INTO ticket_numbers (ticketnummer, token, bestellnummer) VALUES ($1, $2, NULL)',
+      'INSERT INTO ticket_numbers (ticketnummer, token) VALUES ($1, $2)',
       [nummer, token]
     );
 
@@ -129,6 +86,17 @@ async function generiereTicketnummer(email) {
     client.release();
   }
 }
+
+// Remove unnecessary initialization logic for ticket numbers
+async function initializeTicketNumbers() {
+  console.log('Ticketnummern werden dynamisch generiert. Keine Vorinitialisierung erforderlich.');
+}
+
+// Initialisierung der Datenbank und Ticketnummern
+initializeDatabase()
+  .then(() => bereinigeTicketNumbers())
+  .then(() => initializeTicketNumbers())
+  .catch(console.error);
 
 // Helper functions
 async function ladeBisherigeTickets() {
@@ -716,3 +684,32 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server läuft auf Port ${PORT}`);
 });
+
+async function bereinigeTicketNumbers() {
+  const client = await pool.connect();
+  try {
+    console.log('Bereinige ungültige Einträge in der Tabelle ticket_numbers...');
+
+    // Setze `bestellnummer` auf NULL, wenn die zugehörige Bestellung nicht existiert
+    const { rowCount } = await client.query(`
+      UPDATE ticket_numbers
+      SET bestellnummer = NULL
+      WHERE bestellnummer IS NOT NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM tickets WHERE tickets.bestellnummer = ticket_numbers.bestellnummer
+      );
+    `);
+
+    console.log(`${rowCount} ungültige Einträge wurden bereinigt.`);
+  } catch (error) {
+    console.error('Fehler bei der Bereinigung der Tabelle ticket_numbers:', error);
+  } finally {
+    client.release();
+  }
+}
+
+// Initialisierung der Datenbank und Bereinigung
+initializeDatabase()
+  .then(() => bereinigeTicketNumbers())
+  .then(() => initializeTicketNumbers())
+  .catch(console.error);
