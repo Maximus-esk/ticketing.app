@@ -152,14 +152,14 @@ function authentifiziere(req, res, next) {
 
   if (!token) {
     console.error('Fehler: Kein Token bereitgestellt.');
-    return res.status(403).json({ redirect: '/unauthorized.html', message: 'Zugriff verweigert: Kein Token bereitgestellt.' });
+    return res.status(403).json({ message: 'Zugriff verweigert: Kein Token bereitgestellt.' });
   }
 
   const benutzer = validiereToken(token);
 
   if (!benutzer) {
     console.error('Fehler: Ungültiger Token.');
-    return res.status(403).json({ redirect: '/unauthorized.html', message: 'Zugriff verweigert: Ungültiger Token.' });
+    return res.status(403).json({ message: 'Zugriff verweigert: Ungültiger Token.' });
   }
 
   console.log(`Benutzer authentifiziert: ${benutzer.username}`);
@@ -175,7 +175,7 @@ app.get('/ticketing', authentifiziere, async (req, res) => {
   console.log('Route /ticketing aufgerufen.');
   if (req.benutzer.recht !== 'Admin' && req.benutzer.recht !== 'Purchase') {
     console.error('Fehler: Keine Berechtigung für Ticketing.');
-    return res.status(403).json({ message: 'Zugriff verweigert: Keine Berechtigung.' });
+    return res.redirect(`${process.env.CORS_ORIGIN}/unauthorized.html`);
   }
 
   // Redirect to the frontend ticketing page
@@ -187,7 +187,7 @@ app.get('/inlet', authentifiziere, (req, res) => {
   console.log('Route /inlet aufgerufen.');
   if (req.benutzer.recht !== 'Admin' && req.benutzer.recht !== 'Scanner') {
     console.error('Fehler: Keine Berechtigung für Inlet.');
-    return res.status(403).json({ message: 'Zugriff verweigert: Keine Berechtigung.' });
+    return res.redirect(`${process.env.CORS_ORIGIN}/unauthorized.html`);
   }
 
   // Redirect to the frontend inlet page
@@ -412,12 +412,6 @@ app.post('/api/tickets', async (req, res) => {
     const neue_bestellnummer = `GFS2025-${String(Date.now()).slice(-4)}`;
     const gesamtpreis = 49.99 + (anzahl_tickets - 1) * 12.49;
 
-    const ticketnummern = [];
-    for (let i = 0; i < anzahl_tickets; i++) {
-      const { nummer, token } = await generiereTicketnummer(email);
-      ticketnummern.push({ nummer, token });
-    }
-
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
@@ -431,14 +425,6 @@ app.post('/api/tickets', async (req, res) => {
         new Date().toISOString(), neue_bestellnummer, gesamtpreis
       ];
       await client.query(query, values);
-
-      for (const { nummer, token } of ticketnummern) {
-        await client.query(
-          'UPDATE ticket_numbers SET bestellnummer = $1 WHERE ticketnummer = $2',
-          [neue_bestellnummer, nummer]
-        );
-      }
-
       await client.query('COMMIT');
     } catch (error) {
       await client.query('ROLLBACK');
@@ -448,14 +434,13 @@ app.post('/api/tickets', async (req, res) => {
     }
 
     res.status(201).json({
-      message: 'Tickets erfolgreich gekauft.',
+      message: 'Bestellung erfolgreich gespeichert.',
       bestellnummer: neue_bestellnummer,
-      gesamtpreis,
-      tickets: ticketnummern
+      gesamtpreis
     });
   } catch (error) {
-    console.error('Error saving ticket:', error);
-    res.status(500).json({ message: 'Fehler beim Speichern des Tickets.' });
+    console.error('Error saving order:', error);
+    res.status(500).json({ message: 'Fehler beim Speichern der Bestellung.' });
   }
 });
 
@@ -546,18 +531,54 @@ Ihr Orga-Team der Abschlussparty 2025`
   }
 });
 
-// PATCH: Update payment status
+// PATCH: Update payment status and generate tickets
 app.patch('/api/tickets/:bestellnummer/gezahlt', authentifiziere, async (req, res) => {
   const { bestellnummer } = req.params;
+
+  if (!req.benutzer || req.benutzer.recht !== 'Admin') {
+    return res.status(403).json({ message: 'Zugriff verweigert: Keine Berechtigung.' });
+  }
+
   try {
-    const { rowCount } = await pool.query('UPDATE tickets SET gezahlt = TRUE WHERE bestellnummer = $1', [bestellnummer]);
-    if (rowCount === 0) {
-      return res.status(404).json({ message: 'Bestellnummer nicht gefunden.' });
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      const { rows } = await client.query(
+        'UPDATE tickets SET gezahlt = TRUE WHERE bestellnummer = $1 RETURNING *',
+        [bestellnummer]
+      );
+      if (rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ message: 'Bestellnummer nicht gefunden.' });
+      }
+
+      const order = rows[0];
+      const ticketnummern = [];
+      for (let i = 0; i < order.anzahl_tickets; i++) {
+        const { nummer, token } = await generiereTicketnummer(order.email);
+        ticketnummern.push({ nummer, token });
+      }
+
+      for (const { nummer } of ticketnummern) {
+        await client.query(
+          'UPDATE ticket_numbers SET bestellnummer = $1 WHERE ticketnummer = $2',
+          [bestellnummer, nummer]
+        );
+      }
+
+      await client.query('COMMIT');
+      res.json({ message: 'Zahlungsstatus aktualisiert und Tickets generiert.', tickets: ticketnummern });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      console.error('Fehler beim Aktualisieren des Zahlungsstatus:', error);
+      res.status(500).json({ message: 'Fehler beim Aktualisieren des Zahlungsstatus.' });
+    } finally {
+      client.release();
     }
-    res.json({ message: 'Zahlungsstatus aktualisiert.' });
   } catch (error) {
-    console.error('Error updating payment status:', error);
-    res.status(500).json({ message: 'Fehler beim Aktualisieren des Zahlungsstatus.' });
+    console.error('Fehler beim Verarbeiten der Anfrage:', error);
+    res.status(500).json({ message: 'Interner Serverfehler.' });
   }
 });
 
@@ -565,18 +586,27 @@ app.patch('/api/tickets/:bestellnummer/gezahlt', authentifiziere, async (req, re
 app.post('/api/validate-ticket', authentifiziere, async (req, res) => {
   const { token } = req.body;
 
+  if (!req.benutzer || req.benutzer.recht !== 'Scanner') {
+    return res.status(403).json({ message: 'Zugriff verweigert: Keine Berechtigung.' });
+  }
+
   if (!token) {
     return res.status(400).json({ message: 'Kein Token bereitgestellt.' });
   }
 
   try {
-    const { rows } = await pool.query('SELECT * FROM tickets WHERE token = $1', [token]);
+    const { rows } = await pool.query('SELECT * FROM ticket_numbers WHERE token = $1', [token]);
     if (rows.length === 0) {
       return res.status(404).json({ message: 'Ungültiger QR-Code.' });
     }
 
     const ticket = rows[0];
-    if (!ticket.gezahlt) {
+    if (!ticket.bestellnummer) {
+      return res.status(400).json({ message: 'Ticket ist nicht mit einer Bestellung verknüpft.' });
+    }
+
+    const { rows: orderRows } = await pool.query('SELECT * FROM tickets WHERE bestellnummer = $1', [ticket.bestellnummer]);
+    if (orderRows.length === 0 || !orderRows[0].gezahlt) {
       return res.status(400).json({ message: 'Ticket ist nicht bezahlt.' });
     }
 
@@ -584,10 +614,10 @@ app.post('/api/validate-ticket', authentifiziere, async (req, res) => {
       return res.status(400).json({ message: 'Ticket wurde bereits gescannt.' });
     }
 
-    await pool.query('UPDATE tickets SET scanned = TRUE WHERE id = $1', [ticket.id]);
-    res.json({ message: `Ticket für ${ticket.name} akzeptiert.` });
+    await pool.query('UPDATE ticket_numbers SET scanned = TRUE WHERE id = $1', [ticket.id]);
+    res.json({ message: `Ticket akzeptiert: ${orderRows[0].vorname} ${orderRows[0].name}` });
   } catch (error) {
-    console.error('Error validating token:', error);
+    console.error('Fehler bei der Token-Validierung:', error);
     res.status(500).json({ message: 'Fehler bei der Token-Validierung.' });
   }
 });
