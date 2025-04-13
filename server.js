@@ -48,7 +48,8 @@ async function initializeDatabase() {
         id SERIAL PRIMARY KEY,
         ticketnummer TEXT UNIQUE NOT NULL,
         token TEXT UNIQUE NOT NULL,
-        bestellnummer TEXT REFERENCES tickets(bestellnummer) DEFAULT NULL
+        bestellnummer TEXT REFERENCES tickets(bestellnummer) DEFAULT NULL,
+        scanned BOOLEAN DEFAULT FALSE
       );
     `);
   } finally {
@@ -106,15 +107,14 @@ async function ladeBisherigeTickets() {
 
 async function speichereTicket(ticket) {
   const query = `
-    INSERT INTO tickets (vorname, name, email, anzahl_tickets, zeitpunkt, letzte_ticketnummer, bestellnummer, gesamtpreis, token)
+    INSERT INTO tickets (vorname, name, email, anzahl_tickets, zeitpunkt, bestellnummer, gesamtpreis)
     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
     RETURNING *;
   `;
   const values = [
     ticket.vorname, ticket.name, ticket.email, ticket.anzahl_tickets,
     ticket.zeitpunkt, ticket.letzte_ticketnummer, ticket.bestellnummer,
-    ticket.gesamtpreis, ticket.token
-  ];
+    ticket.gesamtpreis, ticket.token  ];
   const { rows } = await pool.query(query, values);
   return rows[0];
 }
