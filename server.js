@@ -39,7 +39,8 @@ async function initializeDatabase() {
         bestellnummer TEXT UNIQUE NOT NULL,
         gesamtpreis REAL NOT NULL,
         gezahlt BOOLEAN DEFAULT FALSE,
-        email_sent BOOLEAN DEFAULT FALSE
+        email_sent BOOLEAN DEFAULT FALSE,
+        reminder_sent BOOLEAN DEFAULT FALSE -- Neues Feld für Erinnerungsstatus
       );
     `);
 
@@ -173,12 +174,10 @@ app.use(express.static(path.join(__dirname, '../public')));
 // Kombinierte Route: Ticketing und Bestellwesen
 app.get('/ticketing', authentifiziere, async (req, res) => {
   console.log('Route /ticketing aufgerufen.');
-  if (req.benutzer.recht !== 'Admin' && req.benutzer.recht !== 'Purchase') {
+  if (!req.benutzer || (req.benutzer.recht !== 'Admin' && req.benutzer.recht !== 'Purchase')) {
     console.error('Fehler: Keine Berechtigung für Ticketing.');
-    return res.redirect(`${process.env.CORS_ORIGIN}/unauthorized.html`);
+    return res.status(403).json({ message: 'Zugriff verweigert: Keine Berechtigung.' });
   }
-
-  // Redirect to the frontend ticketing page
   res.redirect(`${process.env.CORS_ORIGIN}/ticketing.html`);
 });
 
@@ -404,8 +403,9 @@ app.post('/api/tickets', async (req, res) => {
       return res.status(400).json({ message: 'Nicht genügend Tickets verfügbar.' });
     }
 
-    const { rows } = await pool.query('SELECT * FROM tickets WHERE name = $1 AND email = $2', [name, email]);
-    if (rows.length > 0) {
+    // Überprüfen, ob bereits eine Bestellung mit derselben E-Mail und demselben Namen existiert
+    const { rows: existingOrders } = await pool.query('SELECT * FROM tickets WHERE name = $1 AND email = $2', [name, email]);
+    if (existingOrders.length > 0) {
       return res.status(400).json({ message: 'Sie haben bereits Tickets gekauft.' });
     }
 
@@ -424,23 +424,27 @@ app.post('/api/tickets', async (req, res) => {
         vorname, name, email, anzahl_tickets,
         new Date().toISOString(), neue_bestellnummer, gesamtpreis
       ];
-      await client.query(query, values);
+      const { rows } = await client.query(query, values);
+
+      // Sende Bestell-E-Mail
+      await sendeBestellEmail(email, neue_bestellnummer, gesamtpreis, anzahl_tickets);
+
       await client.query('COMMIT');
+      res.status(201).json({
+        message: 'Bestellung erfolgreich gespeichert.',
+        bestellnummer: neue_bestellnummer,
+        gesamtpreis
+      });
     } catch (error) {
       await client.query('ROLLBACK');
-      throw error;
+      console.error('Fehler beim Speichern der Bestellung:', error);
+      res.status(500).json({ message: 'Fehler beim Speichern der Bestellung.' });
     } finally {
       client.release();
     }
-
-    res.status(201).json({
-      message: 'Bestellung erfolgreich gespeichert.',
-      bestellnummer: neue_bestellnummer,
-      gesamtpreis
-    });
   } catch (error) {
-    console.error('Error saving order:', error);
-    res.status(500).json({ message: 'Fehler beim Speichern der Bestellung.' });
+    console.error('Fehler beim Verarbeiten der Bestellung:', error);
+    res.status(500).json({ message: 'Interner Serverfehler.' });
   }
 });
 
@@ -505,6 +509,10 @@ app.post('/api/tickets/:bestellnummer/send-reminder', async (req, res) => {
     }
 
     const ticket = rows[0];
+    if (ticket.reminder_sent) {
+      return res.status(400).json({ message: 'Erinnerungs-E-Mail wurde bereits gesendet.' });
+    }
+
     await transporter.sendMail({
       from: process.env.EMAIL_USER,
       to: ticket.email,
